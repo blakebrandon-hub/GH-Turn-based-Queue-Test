@@ -629,13 +629,6 @@ def handle_add_video_socket(data):
     current_turn = get_current_turn(room_name)
     username = get_display_name()
     
-    if not user_can_moderate(current_user.id, room_name) and current_turn != username:
-        emit('turn_error', {
-            'message': f"It's {current_turn}'s turn to add a video!",
-            'current_turn': current_turn
-        }, room=request.sid)
-        return
-    
     # Convert video_id to full URL
     video_url = f'https://www.youtube.com/watch?v={video_id}'
     
@@ -660,11 +653,6 @@ def handle_add_video_socket(data):
                 'base': 0.0,
                 'started_at': time(),
             }
-        
-    if not user_can_moderate(current_user.id, room_name):
-        next_turn = advance_turn(room_name)
-    else:
-        next_turn = get_current_turn(room_name)
         
         # Get updated queue in old format
         queue_items = get_queue_for_room(room_name)
