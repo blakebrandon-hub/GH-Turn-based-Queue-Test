@@ -24,6 +24,10 @@ room_turn_queues = {}  # room_name -> deque of usernames for turn order
 MAIN_ROOM_NAME = "Main Room"
 API_KEY = 'AIzaSyC80EUqt8ErvmmJ-Q-5Srq2L72Ur0D3Mmg'
 
+# Track if we've already advanced the head during the currently playing song.
+# If False when a song ends/gets skipped, we advance once there.
+room_advanced_this_song = {}  # room_name -> bool
+
 # Flask setup
 app = Flask(__name__)
 app.config['SECRET_KEY'] = "dsfsdfdsfsdfgdfgsdfgsfghhhhh333"
@@ -163,6 +167,10 @@ def broadcast_turn_update(room_name):
         'current_turn': get_current_turn(room_name),
         'turn_queue': list(get_turn_queue(room_name))
     }, room=room_name)
+
+def _start_song_window(room_name: str):
+    """New song just started; no head-advance has occurred yet this song."""
+    room_advanced_this_song[room_name] = False
 
 # ===== Existing Helpers =====
 def get_display_name():
@@ -498,7 +506,8 @@ def handle_skip_song():
     # Update clock to next head (if any)
     queue_items = get_queue_for_room(room_name)
     if queue_items:
-        room_clock[room_name] = {'video_id': extract_video_id(queue_items[0].video_url), 'base': 0.0, 'started_at': time()}
+        next_id = extract_video_id(queue_items[0].video_url)
+        room_clock[room_name] = {'video_id': next_id, 'base': 0.0, 'started_at': time()}
     else:
         room_clock[room_name] = {'video_id': '', 'base': 0.0, 'started_at': None}
 
@@ -506,10 +515,14 @@ def handle_skip_song():
     emit('video_added', convert_queue_to_old_format(queue_items), room=room_name)
     emit('skip_video', room=room_name)
 
-    # ----- END OF SONG WINDOW LOGIC -----
-    if get_turn_queue(room_name):
-        advance_turn(room_name)           # rotate once at end of song/skip
-        broadcast_turn_update(room_name)  # notify clients
+    # ----- SONG-END/ SKIP TURN LOGIC -----
+    # Advance at end/skip only if we *didn't* already advance earlier this song.
+    if not room_advanced_this_song.get(room_name, False) and get_turn_queue(room_name):
+        advance_turn(room_name)
+        broadcast_turn_update(room_name)
+
+    # Start a fresh window for the new song (if any)
+    _start_song_window(room_name)
 
 @socketio.on('update_time')
 def handle_update_time(data):
@@ -531,11 +544,11 @@ def handle_add_video_socket(data):
 
     username = get_display_name()
     is_mod = user_can_moderate(current_user.id, room_name)
-    current_turn = get_current_turn(room_name)
+    current_head = get_current_turn(room_name)
 
     # Enforce turn unless moderator
-    if not is_mod and (current_turn is not None) and (username != current_turn):
-        emit('turn_error', {'message': f"Not your turn. It's {current_turn}'s turn."}, to=request.sid)
+    if not is_mod and (current_head is not None) and (username != current_head):
+        emit('turn_error', {'message': f"Not your turn. It's {current_head}'s turn."}, to=request.sid)
         return
 
     video_url = f'https://www.youtube.com/watch?v={video_id}'
@@ -545,18 +558,23 @@ def handle_add_video_socket(data):
         db.session.add(qi)
         db.session.commit()
 
-        # If first item, start playback clock
+        # If first item, start playback clock and start a fresh song window
         if QueueItem.query.filter_by(room_id=room.id).count() == 1:
             room_clock[room_name] = {'video_id': video_id, 'base': 0.0, 'started_at': time()}
+            _start_song_window(room_name)
 
         # Update queue UI (old format for frontend)
         socketio.emit('video_added', convert_queue_to_old_format(get_queue_for_room(room_name)), room=room_name)
 
-        # IMPORTANT: Do NOT advance turn here.
-        # Rotation happens only when a song ends (or is skipped).
-
-        # Optional: keep UI's turn widget fresh
-        broadcast_turn_update(room_name)
+        # IMPORTANT: Advance the turn immediately if the *head* added.
+        # (Mods adding out of turn do not rotate the queue.)
+        if username == current_head:
+            advance_turn(room_name)
+            room_advanced_this_song[room_name] = True  # mark that we rotated during this song
+            broadcast_turn_update(room_name)
+        else:
+            # Keep UI's turn widget fresh even if no rotation occurred
+            broadcast_turn_update(room_name)
 
     except Exception as e:
         db.session.rollback()
@@ -580,10 +598,14 @@ def handle_video_ended():
 
     emit('video_ended', room=room_name)
 
-    # ----- END OF SONG WINDOW LOGIC -----
-    if get_turn_queue(room_name):
-        advance_turn(room_name)           # rotate once at natural end
-        broadcast_turn_update(room_name)  # notify clients
+    # ----- SONG-END TURN LOGIC -----
+    # If we *didn't* already rotate during this song (on add), rotate now (they missed their turn).
+    if not room_advanced_this_song.get(room_name, False) and get_turn_queue(room_name):
+        advance_turn(room_name)
+        broadcast_turn_update(room_name)
+
+    # New song window begins (if any song is now playing)
+    _start_song_window(room_name)
 
     # Send updated queue state
     emit('sync_video', {
