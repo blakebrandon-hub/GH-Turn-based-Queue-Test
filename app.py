@@ -18,8 +18,8 @@ from collections import deque
 
 
 # ===== Global vars =====
-messages = {}         # room_id -> list of {username, text} (already exists)
-user_rooms = {}       # sid -> room_id (already exists)
+messages = {}          # room_id -> list of {username, text}
+user_rooms = {}        # sid -> room_name
 room_turn_queues = {}  # room_name -> deque of usernames for turn order
 MAIN_ROOM_NAME = "Main Room"
 API_KEY = 'AIzaSyC80EUqt8ErvmmJ-Q-5Srq2L72Ur0D3Mmg'
@@ -44,9 +44,7 @@ CORS(app)
 uri = os.getenv("DATABASE_URL", "sqlite:///local.db")
 if uri.startswith("postgres://"):
     uri = uri.replace("postgres://", "postgresql+psycopg2://", 1)
-
 app.config["SQLALCHEMY_DATABASE_URI"] = uri
-
 db = SQLAlchemy(app)
 
 # Login setup
@@ -89,7 +87,6 @@ class User(UserMixin, db.Model):
 
 class QueueItem(db.Model):
     __tablename__ = 'queue_items'
-    
     id = db.Column(db.Integer, primary_key=True)
     room_id = db.Column(db.Integer, db.ForeignKey('rooms.id'), nullable=False)
     video_url = db.Column(db.String(255), nullable=False)
@@ -97,8 +94,6 @@ class QueueItem(db.Model):
     video_duration = db.Column(db.Integer)
     added_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
     added_at = db.Column(db.DateTime, default=datetime.utcnow)
-
-    # Add relationships for easier querying
     room = db.relationship('Room', backref='queue_items')
     user = db.relationship('User', backref='queue_items')
 
@@ -108,7 +103,6 @@ class RoomTurnOrder(db.Model):
     room_id = db.Column(db.Integer, db.ForeignKey('rooms.id'), nullable=False)
     username = db.Column(db.String(150), nullable=False)
     position = db.Column(db.Integer, nullable=False)
-    
     room = db.relationship('Room', backref='turn_orders')
 
 # ===== Turn-based helpers =====
@@ -117,8 +111,7 @@ def get_turn_queue(room_name):
     if room_name not in room_turn_queues:
         room = get_room_by_name(room_name)
         if room:
-            turn_orders = RoomTurnOrder.query.filter_by(room_id=room.id)\
-                                             .order_by(RoomTurnOrder.position).all()
+            turn_orders = RoomTurnOrder.query.filter_by(room_id=room.id).order_by(RoomTurnOrder.position).all()
             room_turn_queues[room_name] = deque([to.username for to in turn_orders])
         else:
             room_turn_queues[room_name] = deque()
@@ -162,9 +155,7 @@ def advance_turn(room_name):
 def remove_user_from_turns(room_name, username):
     tq = get_turn_queue(room_name)
     if username in tq:
-        was_head = (tq[0] == username)
         tq.remove(username)
-        # If we removed the head, nothing else to do—new head is already correct
         save_turn_queue(room_name)
 
 def broadcast_turn_update(room_name):
@@ -354,7 +345,8 @@ def remove_video(video_id):
     room_name = video.room.name
     if video.added_by != current_user.id and not user_can_moderate(current_user.id, room_name):
         return jsonify({'error': 'Permission denied'}), 403
-    db.session.delete(video); db.session.commit()
+    db.session.delete(video)
+    db.session.commit()
     queue_items = get_queue_for_room(room_name)
     socketio.emit('video_added', convert_queue_to_old_format(queue_items), room=room_name)
     return jsonify({'success': True})
@@ -500,19 +492,28 @@ def handle_skip_song():
     if not user_can_moderate(current_user.id, room_name):
         return
 
+    # Remove current video
     skip_current_video(room_name)
 
+    # Update clock to next head (if any)
     queue_items = get_queue_for_room(room_name)
     if queue_items:
         room_clock[room_name] = {'video_id': extract_video_id(queue_items[0].video_url), 'base': 0.0, 'started_at': time()}
     else:
         room_clock[room_name] = {'video_id': '', 'base': 0.0, 'started_at': None}
 
+    # Update queue display and notify skip
     emit('video_added', convert_queue_to_old_format(queue_items), room=room_name)
     emit('skip_video', room=room_name)
 
+    # ----- END OF SONG WINDOW LOGIC -----
+    if get_turn_queue(room_name):
+        advance_turn(room_name)           # rotate once at end of song/skip
+        broadcast_turn_update(room_name)  # notify clients
+
 @socketio.on('update_time')
 def handle_update_time(data):
+    # placeholder; no-op
     pass
 
 @socketio.on('add_video')
@@ -544,14 +545,17 @@ def handle_add_video_socket(data):
         db.session.add(qi)
         db.session.commit()
 
-        # Start clock if first item
+        # If first item, start playback clock
         if QueueItem.query.filter_by(room_id=room.id).count() == 1:
             room_clock[room_name] = {'video_id': video_id, 'base': 0.0, 'started_at': time()}
 
+        # Update queue UI (old format for frontend)
         socketio.emit('video_added', convert_queue_to_old_format(get_queue_for_room(room_name)), room=room_name)
 
-        # ALWAYS advance turn after a counted add (even if moderator), so no one gets stuck at head
-        advance_turn(room_name)
+        # IMPORTANT: Do NOT advance turn here.
+        # Rotation happens only when a song ends (or is skipped).
+
+        # Optional: keep UI's turn widget fresh
         broadcast_turn_update(room_name)
 
     except Exception as e:
@@ -561,8 +565,11 @@ def handle_add_video_socket(data):
 @socketio.on('video_ended')
 def handle_video_ended():
     room_name = get_user_room(request.sid)
+
+    # Remove the finished video from DB
     skip_current_video(room_name)
 
+    # Prepare next playback state
     queue_items = get_queue_for_room(room_name)
     current_video_id = extract_video_id(queue_items[0].video_url) if queue_items else ''
 
@@ -572,6 +579,13 @@ def handle_video_ended():
         room_clock[room_name] = {'video_id': '', 'base': 0.0, 'started_at': None}
 
     emit('video_ended', room=room_name)
+
+    # ----- END OF SONG WINDOW LOGIC -----
+    if get_turn_queue(room_name):
+        advance_turn(room_name)           # rotate once at natural end
+        broadcast_turn_update(room_name)  # notify clients
+
+    # Send updated queue state
     emit('sync_video', {
         'video_queue': convert_queue_to_old_format(queue_items),
         'time': 0,
