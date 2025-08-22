@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>Delete Room – Groove Hub</title>
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+  <link href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css" rel="stylesheet">
+  <link rel="icon" href="{{ url_for('static', filename='images/favicon.ico') }}">
+</head>
+<body class="bg-dark text-white">
+
+  <!-- Navbar -->
+  <nav class="navbar d-flex justify-content-between align-items-center px-4 py-2 bg-dark border-bottom border-light">
+    <a href="{{ url_for('index') }}" class="navbar-brand text-white">
+      <i class="bi bi-music-note-beamed"></i> Groove Hub
+    </a>
+    <a href="{{ url_for('logout') }}" class="btn btn-outline-light btn-sm">Logout</a>
+  </nav>
+
+  <!-- Confirm Delete Section -->
+  <div class="container text-center py-5">
+    <h2 class="mb-4">Delete Room</h2>
+    <p class="lead mb-4">
+      Are you sure you want to permanently delete the room
+      <strong class="text-warning">{{ room.name }}</strong>?
+      <br>
+      This action cannot be undone and all users will be removed.
+    </p>
+
+    <form action="{{ url_for('delete_room', room_name=room.name) }}" method="POST">
+      <button type="submit" class="btn btn-danger btn-lg me-3">Yes, Delete Room</button>
+      <a href="{{ url_for('rooms_page') }}" class="btn btn-secondary btn-lg">Cancel</a>
+    </form>
+  </div>
+
+</body>
+</html>
+

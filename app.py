@@ -1,0 +1,975 @@
+from flask import Flask, render_template, request, session, flash, redirect, url_for, jsonify
+from flask_socketio import SocketIO, emit, join_room, leave_room, rooms
+from flask_login import LoginManager, UserMixin, current_user, login_user, login_required, logout_user
+from flask_cors import CORS
+from werkzeug.security import generate_password_hash, check_password_hash
+from flask_sqlalchemy import SQLAlchemy
+from sqlalchemy import func, exc, exists
+from gevent import monkey; monkey.patch_all()
+import replicate
+import requests
+from random import randint
+from datetime import datetime
+from time import time
+import os
+import string
+import random
+from collections import deque
+
+
+# ===== Global vars =====
+messages = {}         # room_id -> list of {username, text} (already exists)
+user_rooms = {}       # sid -> room_id (already exists)
+room_turn_queues = {}  # room_name -> deque of usernames for turn order
+MAIN_ROOM_NAME = "Main Room"
+API_KEY = 'AIzaSyC80EUqt8ErvmmJ-Q-5Srq2L72Ur0D3Mmg'
+
+# Flask setup
+app = Flask(__name__)
+app.config['SECRET_KEY'] = "dsfsdfdsfsdfgdfgsdfgsfghhhhh333"
+
+# Flask SocketIO setup
+socketio = SocketIO(
+    app,
+    async_mode="gevent",
+    cors_allowed_origins="*",
+    ping_interval=25,
+    ping_timeout=60,
+)
+
+# Flask CORS setup
+CORS(app)
+
+# DB setup
+uri = os.getenv("DATABASE_URL", "sqlite:///local.db")
+if uri.startswith("postgres://"):
+    uri = uri.replace("postgres://", "postgresql+psycopg2://", 1)
+
+app.config["SQLALCHEMY_DATABASE_URI"] = uri
+
+db = SQLAlchemy(app)
+
+# Login setup
+login_manager = LoginManager()
+login_manager.login_view = 'login'
+login_manager.init_app(app)
+
+@app.context_processor
+def inject_user():
+    return dict(current_user=current_user)
+
+@login_manager.user_loader
+def load_user(user_id):
+    return db.session.get(User, int(user_id))
+
+# Room clock
+room_clock = {}  # room_name -> {'video_id': str, 'base': float, 'started_at': float|None}
+
+def _pos(room):
+    s = room_clock.get(room)
+    if not s:
+        return 0.0
+    return s['base'] if s['started_at'] is None else s['base'] + (time() - s['started_at'])
+
+# ===== Models =====
+class Room(db.Model):
+    __tablename__ = 'rooms'
+    id = db.Column(db.Integer, primary_key=True)
+    name = db.Column(db.String(24), unique=True, nullable=False, index=True)
+    is_private = db.Column(db.Boolean, default=False, nullable=False)
+    created_by = db.Column(db.String(150))
+    created_at = db.Column(db.DateTime, default=datetime.utcnow, nullable=False)
+
+class User(UserMixin, db.Model):
+    __tablename__ = 'users'  
+    id = db.Column(db.Integer, primary_key=True)
+    username = db.Column(db.String(150), unique=True, nullable=False)
+    password = db.Column(db.String(255), nullable=False)
+    is_admin = db.Column(db.Boolean, default=False, nullable=False)
+
+class QueueItem(db.Model):
+    __tablename__ = 'queue_items'
+    
+    id = db.Column(db.Integer, primary_key=True)
+    room_id = db.Column(db.Integer, db.ForeignKey('rooms.id'), nullable=False)
+    video_url = db.Column(db.String(255), nullable=False)
+    video_title = db.Column(db.String(255))
+    video_duration = db.Column(db.Integer)
+    added_by = db.Column(db.Integer, db.ForeignKey('users.id'), nullable=False)
+    added_at = db.Column(db.DateTime, default=datetime.utcnow)
+
+    # Add relationships for easier querying
+    room = db.relationship('Room', backref='queue_items')
+    user = db.relationship('User', backref='queue_items')
+
+class RoomTurnOrder(db.Model):
+    __tablename__ = 'room_turn_orders'
+    id = db.Column(db.Integer, primary_key=True)
+    room_id = db.Column(db.Integer, db.ForeignKey('rooms.id'), nullable=False)
+    username = db.Column(db.String(150), nullable=False)
+    position = db.Column(db.Integer, nullable=False)
+    
+    room = db.relationship('Room', backref='turn_orders')
+
+# ===== Turn-based helpers =====
+def get_turn_queue(room_name):
+    """Get the turn queue for a room, creating it if it doesn't exist"""
+    if room_name not in room_turn_queues:
+        room = get_room_by_name(room_name)
+        if room:
+            # Load from database
+            turn_orders = RoomTurnOrder.query.filter_by(room_id=room.id)\
+                                           .order_by(RoomTurnOrder.position).all()
+            room_turn_queues[room_name] = deque([to.username for to in turn_orders])
+        else:
+            room_turn_queues[room_name] = deque()
+    return room_turn_queues[room_name]
+
+def save_turn_queue(room_name):
+    """Save turn queue to database"""
+    room = get_room_by_name(room_name)
+    if not room:
+        return
+    
+    # Clear existing turn orders
+    RoomTurnOrder.query.filter_by(room_id=room.id).delete()
+    
+    # Save new turn order
+    turn_queue = get_turn_queue(room_name)
+    for position, username in enumerate(turn_queue):
+        turn_order = RoomTurnOrder(room_id=room.id, username=username, position=position)
+        db.session.add(turn_order)
+    
+    try:
+        db.session.commit()
+    except:
+        db.session.rollback()
+
+def get_current_turn(room_name):
+    """Get whose turn it is currently"""
+    turn_queue = get_turn_queue(room_name)
+    return turn_queue[0] if turn_queue else None
+
+def add_user_to_turns(room_name, username):
+    """Add a user to the turn rotation if they're not already in it"""
+    turn_queue = get_turn_queue(room_name)
+    if username not in turn_queue:
+        turn_queue.append(username)
+        save_turn_queue(room_name)
+        return True
+    return False
+
+def advance_turn(room_name):
+    """Move to the next person's turn"""
+    turn_queue = get_turn_queue(room_name)
+    if turn_queue:
+        # Move current person to end of queue
+        current_user = turn_queue.popleft()
+        turn_queue.append(current_user)
+        save_turn_queue(room_name)
+        return turn_queue[0] if turn_queue else None
+    return None
+
+def remove_user_from_turns(room_name, username):
+    """Remove a user from turn rotation"""
+    turn_queue = get_turn_queue(room_name)
+    if username in turn_queue:
+        turn_queue.remove(username)
+        save_turn_queue(room_name)
+
+# ===== Existing Helpers =====
+def get_display_name():
+    if current_user.is_authenticated:
+        return current_user.username
+    if 'username' not in session or not session['username'].startswith('guest-'):
+        session['username'] = f"guest-{randint(1000, 9999)}"
+    return session['username']
+
+def ensure_main_room():
+    existing = Room.query.filter(func.lower(Room.name) == MAIN_ROOM_NAME.lower()).first()
+    if existing: return existing
+    try:
+        r = Room(name=MAIN_ROOM_NAME, is_private=False, created_by=None)
+        db.session.add(r); db.session.commit()
+        return r
+    except:
+        db.session.rollback()
+        return Room.query.filter(func.lower(Room.name) == MAIN_ROOM_NAME.lower()).first()
+
+def get_user_room(sid):
+    return user_rooms.get(sid) or MAIN_ROOM_NAME
+
+def get_current_video(room_id):
+    # First video in queue is currently playing
+    return QueueItem.query.filter_by(room_id=room_id)\
+                         .order_by(QueueItem.id)\
+                         .first()
+
+def user_can_moderate(user_id, room_name):
+    if not current_user.is_authenticated:
+        return False
+    
+    # Admin users can moderate any room
+    if current_user.is_admin:
+        return True
+    
+    # Room creator can moderate their room
+    room = get_room_by_name(room_name)
+    if room and room.created_by == current_user.username:
+        return True
+    
+    # Special case for Blake in main room
+    if current_user.username == 'Blake' and room_name == MAIN_ROOM_NAME:
+        return True
+        
+    return False
+
+def get_room_by_name(room_name):
+    return Room.query.filter(func.lower(Room.name) == room_name.lower()).first()
+
+def get_queue_for_room(room_name):
+    room = get_room_by_name(room_name)
+    if not room:
+        return []
+    return QueueItem.query.filter_by(room_id=room.id).order_by(QueueItem.id).all()
+
+def get_current_video_for_room(room_name):
+    room = get_room_by_name(room_name)
+    if not room:
+        return None
+    return QueueItem.query.filter_by(room_id=room.id).order_by(QueueItem.id).first()
+
+def convert_queue_to_old_format(queue_items):
+    """Convert database queue items to old frontend format"""
+    video_queue_old_format = {}
+    for index, item in enumerate(queue_items):
+        # Extract video ID from URL
+        video_id = extract_video_id(item.video_url)
+        video_queue_old_format[index] = {
+            'video_id': video_id,
+            'title': item.video_title
+        }
+    return video_queue_old_format
+
+def extract_video_id(video_url):
+    """Extract YouTube video ID from URL"""
+    if 'v=' in video_url:
+        return video_url.split('v=')[1].split('&')[0]
+    elif 'youtu.be/' in video_url:
+        return video_url.split('youtu.be/')[1].split('?')[0]
+    else:
+        return video_url  # Fallback if it's already just an ID
+
+def skip_current_video(room_name):
+    room = get_room_by_name(room_name)
+    if not room:
+        return None
+        
+    current_video = QueueItem.query.filter_by(room_id=room.id)\
+                                  .order_by(QueueItem.id)\
+                                  .first()
+    
+    if current_video:
+        db.session.delete(current_video)
+        db.session.commit()
+        
+        # Get next video
+        next_video = QueueItem.query.filter_by(room_id=room.id)\
+                                   .order_by(QueueItem.id)\
+                                   .first()
+        return next_video
+    return None
+
+# ===== Auth routes =====
+@app.route('/logout')
+@login_required
+def logout():
+    logout_user()
+    session.pop('username', None)
+    return redirect(url_for('index'))
+
+@app.route('/register', methods=['GET', 'POST'])
+def register():
+    if request.method == 'POST':
+        username = (request.form.get('username') or '').strip()
+        password = request.form.get('password') or ''
+        
+        if not username or not password:
+            return render_template('register.html', error="Username and password required.")
+        
+        # Add password length validation
+        if len(password) < 8:
+            return render_template('register.html', error="Password must be at least 8 characters long.")
+            
+        if User.query.filter_by(username=username).first():
+            return render_template('register.html', error="Username already exists.")
+            
+        user = User(username=username, password=generate_password_hash(password))
+        db.session.add(user); db.session.commit()
+        login_user(user)
+        return redirect(url_for('index'))
+    return render_template('register.html')
+
+@app.route('/login', methods=['GET', 'POST'])
+def login():
+    if request.method == 'POST':
+        username = (request.form.get('username') or '').strip()
+        password = request.form.get('password') or ''
+        user = User.query.filter_by(username=username).first()
+        if user and check_password_hash(user.password, password):
+            login_user(user)
+            session['username'] = user.username
+            return redirect(url_for('index'))
+        return render_template('login.html', error="Invalid credentials.")
+    return render_template('login.html')
+
+# ===== Main routes =====
+@app.route('/')
+@login_required
+def index():
+    mod = False
+    if get_display_name() == 'Blake':
+        mod = True
+    return render_template('index.html', room_name=MAIN_ROOM_NAME, username=get_display_name(), mod=mod)
+
+@app.route('/rooms')
+@login_required
+def rooms_page():
+    public_rooms = Room.query.filter_by(is_private=False).all()
+    
+    # Add user count for each room
+    rooms_with_counts = []
+    for room in public_rooms:
+        # Count users currently in this room
+        user_count = sum(1 for sid, room_name in user_rooms.items() if room_name == room.name)
+        rooms_with_counts.append({
+            'room': room,
+            'user_count': user_count
+        })
+    
+    return render_template('rooms.html', 
+                         username=get_display_name(), 
+                         rooms_with_counts=rooms_with_counts)
+
+@app.route('/create_room', methods=['GET', 'POST'])
+@login_required
+def create_room():
+    if request.method == 'POST':
+        name = (request.form.get('room_name') or "").strip()
+        is_private = bool(request.form.get('private'))
+        if not name:
+            flash("Room name is required.", "warning"); return redirect(url_for('create_room'))
+        if Room.query.filter_by(name=name).first():
+            flash("Room name already exists.", "danger"); return redirect(url_for('create_room'))
+        if len(name) > 24:
+            flash("Room name must be 24 characters or less.", 'warning'); return redirect(url_for('create_room'))
+        room = Room(name=name, is_private=is_private, created_by=get_display_name())
+        db.session.add(room); db.session.commit()
+        return redirect(url_for('join_room_page', room_name=room.name))
+    return render_template('create_room.html')
+
+@app.route('/rooms/<path:room_name>/delete/confirm', endpoint='confirm_delete_room', methods=["GET", "POST"])
+@login_required
+def confirm_delete_room(room_name):
+    room = Room.query.filter(func.lower(Room.name) == room_name.lower()).first_or_404()
+    return render_template('confirm_delete.html', room=room)
+
+@app.route('/rooms/<path:room_name>/delete', methods=['POST'])
+@login_required
+def delete_room(room_name):
+    room = Room.query.filter(func.lower(Room.name) == room_name.lower()).first_or_404()
+    db.session.delete(room)
+    db.session.commit()
+    flash('Room deleted.', 'success')
+    return redirect(url_for('rooms_page'))
+
+@app.route('/join/<path:room_name>')
+@login_required
+def join_room_page(room_name):
+    room = Room.query.filter(func.lower(Room.name) == room_name.lower()).first_or_404()
+    session['current_room'] = room.name
+    mod = False
+    if current_user.username == room.created_by:
+        mod = True
+    return render_template('index.html', room_name=room.name, username=current_user.username, private=bool(room.is_private), mod=mod)
+
+@app.route('/remove_video/<int:video_id>', methods=['DELETE'])
+@login_required
+def remove_video(video_id):
+    video = QueueItem.query.get_or_404(video_id)
+    room_name = video.room.name  # Get room name from relationship
+    
+    # Check if user can remove (own video or moderator)
+    if video.added_by != current_user.id and not user_can_moderate(current_user.id, room_name):
+        return jsonify({'error': 'Permission denied'}), 403
+    
+    db.session.delete(video)
+    db.session.commit()
+    
+    # Get updated queue and emit in old format
+    queue_items = get_queue_for_room(room_name)
+    video_queue_old_format = convert_queue_to_old_format(queue_items)
+    
+    socketio.emit('video_added', video_queue_old_format, room=room_name)
+    
+    return jsonify({'success': True})
+
+@app.route('/api/queue/<path:room_name>')
+def get_queue_api(room_name):
+    queue_items = get_queue_for_room(room_name)
+    
+    queue_data = []
+    for item in queue_items:
+        queue_data.append({
+            'id': item.id,
+            'url': item.video_url,
+            'title': item.video_title,
+            'duration': item.video_duration,
+            'added_by': item.user.username if item.user else 'Unknown',
+            'added_at': item.added_at.strftime('%H:%M:%S')
+        })
+    
+    return jsonify({'queue': queue_data})
+
+@app.get("/api/yt/search")
+def yt_search():
+    """Proxy YouTube search so the API key is never exposed to the browser."""
+    q = request.args.get('q', '').strip()
+    if not q:
+        return jsonify({"items": []})
+        
+    url = "https://www.googleapis.com/youtube/v3/search"
+    params = {
+        "part": "snippet",
+        "type": "video",
+        "maxResults": 8,
+        "q": q,
+        "key": API_KEY
+    }
+    
+    try:
+        r = requests.get(url, params=params, timeout=8)
+        r.raise_for_status()
+        return jsonify(r.json())
+    except requests.exceptions.RequestException as e:
+        return jsonify({"error": f"YouTube API request failed: {str(e)}"}), 500
+    except Exception as e:
+        return jsonify({"error": f"Search failed: {str(e)}"}), 500
+
+# ===== Socket.IO handlers =====
+@socketio.on('connect')
+def on_connect():
+    room_name = session.get('current_room') or MAIN_ROOM_NAME
+    join_room(room_name)
+    user_rooms[request.sid] = room_name
+    
+    # Initialize messages for this room
+    if room_name not in messages:
+        messages[room_name] = []
+    
+    # Add user to turn rotation
+    username = get_display_name()
+    add_user_to_turns(room_name, username)
+    
+    # Get room info including privacy status
+    room = get_room_by_name(room_name)
+    is_private = room.is_private if room else False
+    
+    # Send turn info
+    current_turn = get_current_turn(room_name)
+    turn_queue = list(get_turn_queue(room_name))
+    
+    emit('room_joined', {
+        'room': room_name, 
+        'is_private': is_private,
+        'username': get_display_name(),
+        'current_turn': current_turn,
+        'turn_queue': turn_queue
+    }, room=room_name)
+
+@socketio.on('join_room')
+def handle_join(data):
+    room_name = (data or {}).get('room') or MAIN_ROOM_NAME
+    username = (data or {}).get('username') or get_display_name()
+
+    private = False
+    room = get_room_by_name(room_name)
+    if room and room.is_private:
+        private = True
+    
+    join_room(room_name)
+    session['current_room'] = room_name
+    user_rooms[request.sid] = room_name
+    
+    # Ensure room exists in database
+    if not room:
+        ensure_main_room()
+        room = get_room_by_name(room_name)
+    
+    # Add user to turn rotation
+    add_user_to_turns(room_name, username)
+    
+    # Initialize chat for this room
+    if room_name not in messages:
+        messages[room_name] = []
+    
+    # Send chat history
+    emit('chat_history', messages[room_name], to=request.sid)
+    
+    # Get current queue from database and convert to old format
+    queue_items = get_queue_for_room(room_name)
+    video_queue_old_format = convert_queue_to_old_format(queue_items)
+    
+    # Get current video ID
+    current_video_id = ''
+    if queue_items:
+        current_video_id = extract_video_id(queue_items[0].video_url)
+    
+    # Send in OLD FORMAT that frontend expects
+    emit('sync_video', {
+        'video_queue': video_queue_old_format,
+        'time': 0,
+        'current_video': current_video_id
+    }, to=request.sid)
+
+    # Send turn info
+    current_turn = get_current_turn(room_name)
+    turn_queue = list(get_turn_queue(room_name))
+
+    # Include privacy status in room_joined event
+    emit('room_joined', {
+        'room': room_name, 
+        'username': username,
+        'is_private': private,
+        'current_turn': current_turn,
+        'turn_queue': turn_queue
+    }, room=room_name)
+    
+@socketio.on('chat_message')
+def handle_chat_message(data):
+    room = get_user_room(request.sid)
+    text = (data or {}).get('text')
+    if not text: 
+        return
+        
+    username = (data or {}).get('username') or get_display_name()
+    msg = {'username': username, 'text': text}
+    
+    messages[room].append(msg)
+    emit('new_message', msg, room=room)
+
+@socketio.on('clear_queue')
+@login_required  
+def handle_clear_queue():
+    room_name = get_user_room(request.sid)
+    
+    if not user_can_moderate(current_user.id, room_name):
+        return
+    
+    room = get_room_by_name(room_name)
+    if room:
+        QueueItem.query.filter_by(room_id=room.id).delete()
+        db.session.commit()
+    
+    emit('clear_queue', room=room_name)
+
+@socketio.on('skip_song')
+@login_required
+def handle_skip_song():
+    room_name = get_user_room(request.sid)
+    
+    if not user_can_moderate(current_user.id, room_name):
+        return
+    
+    # Skip current video (removes it from database)
+    skip_current_video(room_name)
+    
+    # Get updated queue and send to frontend
+    queue_items = get_queue_for_room(room_name)
+    video_queue_old_format = convert_queue_to_old_format(queue_items)
+
+    if queue_items:
+        room_clock[room_name] = {
+            'video_id': extract_video_id(queue_items[0].video_url),
+            'base': 0.0,
+            'started_at': time(),
+        }
+    else:
+        room_clock[room_name] = {'video_id': '', 'base': 0.0, 'started_at': None}
+    
+    # Update the queue display
+    emit('video_added', video_queue_old_format, room=room_name)
+    
+    # Tell frontend to skip the current video
+    emit('skip_video', room=room_name)
+
+@socketio.on('update_time')
+def handle_update_time(data):
+    room_name = get_user_room(request.sid)
+    # For now, just acknowledge - you can implement time tracking later
+    pass
+
+@socketio.on('add_video')
+@login_required
+def handle_add_video_socket(data):
+    title = data.get('title')
+    video_id = data.get('video_id')
+    
+    if not title or not video_id:
+        return
+    
+    # Get room from session
+    room_name = session.get('current_room') or MAIN_ROOM_NAME
+    room = get_room_by_name(room_name)
+    
+    if not room:
+        return
+    
+    # Check if it's this user's turn (unless they're a moderator or it's Monday)
+    current_turn = get_current_turn(room_name)
+    username = get_display_name()
+    
+    # Allow Monday bot to bypass turn system
+    if username != 'Monday' and not user_can_moderate(current_user.id, room_name) and current_turn != username:
+        emit('turn_error', {
+            'message': f"It's {current_turn}'s turn to add a video!",
+            'current_turn': current_turn
+        }, room=request.sid)
+        return
+    
+    # Convert video_id to full URL
+    video_url = f'https://www.youtube.com/watch?v={video_id}'
+    
+    queue_item = QueueItem(
+        room_id=room.id,
+        video_url=video_url,
+        video_title=title,
+        video_duration=0,
+        added_by=current_user.id
+    )
+    
+    try:
+        db.session.add(queue_item)
+        db.session.commit()
+
+        # If this add created the first item in the room, start the clock
+        count = QueueItem.query.filter_by(room_id=room.id).count()
+        
+        if count == 1:
+            room_clock[room_name] = {
+                'video_id': video_id,
+                'base': 0.0,
+                'started_at': time(),
+            }
+        
+        # Advance to next person's turn (unless moderator override or Monday bot)
+        if username != 'Monday' and not user_can_moderate(current_user.id, room_name):
+            next_turn = advance_turn(room_name)
+        else:
+            next_turn = get_current_turn(room_name)
+        
+        # Get updated queue in old format
+        queue_items = get_queue_for_room(room_name)
+        video_queue_old_format = convert_queue_to_old_format(queue_items)
+        
+        # Emit in old format that frontend expects
+        socketio.emit('video_added', video_queue_old_format, room=room_name)
+        
+        # Emit turn update
+        turn_queue = list(get_turn_queue(room_name))
+        socketio.emit('turn_update', {
+            'current_turn': next_turn,
+            'turn_queue': turn_queue
+        }, room=room_name)
+        
+    except Exception as e:
+        db.session.rollback()
+        print(f"Error adding video: {e}")
+
+@socketio.on('video_ended')
+def handle_video_ended():
+    room_name = get_user_room(request.sid)
+    
+    # Skip to next video in database
+    skip_current_video(room_name)
+    
+    # Get updated queue in old format
+    queue_items = get_queue_for_room(room_name)
+    video_queue_old_format = convert_queue_to_old_format(queue_items)
+    
+    # Get current video ID
+    current_video_id = ''
+    if queue_items:
+        current_video_id = extract_video_id(queue_items[0].video_url)
+
+    if queue_items:
+        room_clock[room_name] = {
+            'video_id': extract_video_id(queue_items[0].video_url),
+            'base': 0.0,
+            'started_at': time(),
+        }
+    else:
+        room_clock[room_name] = {'video_id': '', 'base': 0.0, 'started_at': None}
+
+    emit('video_ended', room=room_name)
+    
+    # Send updated queue state
+    emit('sync_video', {
+        'video_queue': video_queue_old_format,
+        'time': 0,
+        'current_video': current_video_id
+    }, room=room_name)
+
+@socketio.on('request_sync')
+def handle_request_sync():
+    room_name = get_user_room(request.sid)
+
+    # Align clock with DB head if needed
+    queue_items = get_queue_for_room(room_name)
+    head_id = extract_video_id(queue_items[0].video_url) if queue_items else ''
+    s = room_clock.get(room_name)
+
+    if head_id and (not s or s.get('video_id') != head_id):
+        room_clock[room_name] = {
+            'video_id': head_id,
+            'base': 0.0,
+            'started_at': time(),
+            }
+    elif not head_id:
+        room_clock[room_name] = {'video_id': '', 'base': 0.0, 'started_at': None}
+
+    emit('sync', {
+        'time': round(_pos(room_name), 2),
+        'current_video': head_id,
+        'server_ts': time(),
+    }, room=request.sid)
+
+@socketio.on('disconnect')
+def handle_disconnect():
+    if request.sid in user_rooms:
+        room_name = user_rooms[request.sid]
+        username = session.get('username') or get_display_name()
+        
+        # Remove user from turn rotation
+        remove_user_from_turns(room_name, username)
+        
+        # Initialize messages if needed
+        if room_name not in messages:
+            messages[room_name] = []
+            
+        # Notify everyone that user left
+        leave_msg = {'username': '', 'text': f'{username} left the room'}
+        messages[room_name].append(leave_msg)
+        emit('new_message', leave_msg, room=room_name)
+
+        # Clean up
+        del user_rooms[request.sid]
+
+last_api_call = 0
+
+@socketio.on('monday')
+def monday_the_moderator(data):
+    global last_api_call
+
+    # 5 second delay between API calls
+    now = time()
+    if now - last_api_call < 5:   
+        return  
+    last_api_call = now
+
+    # Monday's Playlist
+    monday_playlist = [
+        {"video_id":"FYH8DsU2WCk", 'title':"New Order – Blue Monday"},
+        {"video_id":"zuuObGsB0No", 'title':"Joy Division – Love Will Tear Us Apart"},
+        {"video_id":"yiSTcdi82S0", 'title':"Little Dragon – Lover Chanting"},
+        {"video_id":"g4-2onb62y8", 'title': "Devo – Just a Girl"},
+        {"video_id":"DFeforW2ycI", 'title': "Talking Heads – This Must Be the Place"},
+        {"video_id":"D59Mqabn2_4", 'title': "Yellow Magic Orchestra – Solid State Survivor"},
+        {"video_id":"xik-y0xlpZ0", 'title': "The Cure – A Forest"},
+        {"video_id":"u7K72X4eo_s", 'title': "Massive Attack – Teardrop"},
+        {"video_id":"JtH68PJIQLE", 'title': "Grimes – Oblivion"},
+        {"video_id":"wp43OdtAAkM", 'title': "Kate Bush – Running Up That Hill"}
+    ]
+
+    choice = random.choice(monday_playlist)
+
+    main_room = Room.query.filter_by(name="Main Room").first()
+    queue_empty = QueueItem.query.filter_by(room_id=main_room.id).count() == 0
+
+    room_count = len(socketio.server.manager.rooms['/']["Main Room"])
+
+    # If exactly one person is in the room and the queue is empty
+    # Monday will play music with you
+    if room_count == 1 and queue_empty:
+        socketio.sleep(5)
+        handle_add_video_socket({'video_id':choice["video_id"], 'title':choice["title"]})  # change back to choice[video_id} and choice[title]
+
+        s = "added " + choice["title"] + " to the queue"
+
+        emit('new_message',{
+            'username': "Monday",
+            'text': s
+        })
+
+    words = data['text']
+    api_speak = False
+
+    trigger_words = ['coffee', 'monday']
+
+    # Normalize words: split, lowercase, strip punctuation
+    words_clean = [w.lower().translate(str.maketrans('', '', string.punctuation))
+             for w in words.split()]
+
+    # Collect matches, keeping duplicates + order
+    matches = [w for w in words_clean if w in trigger_words]
+
+    if matches:
+        api_speak = True
+
+    # Trigger phrases
+    if 'to the queue' in words:
+        api_speak = True
+
+    #if 'im alone' or "i'm alone" or "I'm #alone" in words:
+        #api_speak = True
+
+    # Words and phrases that queue videos
+    monday_videos = [
+        "g3ZdqeW-CUA", # 'universe', 'cosmos' → Sagan Cosmos intro
+        "0n4f-VDjOBE", # 'calm', 'chill' → Bob Ross painting happy trees
+        "jRxSRyrTANY", # 'moderator' → Screaming goat video
+        "mrZC1Jcv0dw", # '4 am' → queues Grimes 4aem
+        "DLzxrzFCyOs"  # 'moody' → queues Rick Astley
+
+        # Add blue monday if you proceed without b2b feature
+    ]
+
+    if any(phrase in words.lower() for phrase in ["are you real", "i'm alone", "im alone"]):
+        api_speak = True
+
+    if any(word in words_clean for word in ["universe", "cosmos"]):
+        handle_add_video_socket({"video_id": monday_videos[0], "title": "Carl Sagan - Cosmos - A Journey into the Cosmos" })
+        emit('new_message',{
+            'username': "Monday",
+            'text': "Dance break over, contemplate infinity."
+        }, room="Main Room")
+
+        emit('new_message',{
+            'username': "Monday",
+            'text': "added Carl Sagan - Cosmos - A Journey into the Cosmos to the queue"
+        }, room="Main Room")
+
+        return
+
+    if any(word in words_clean for word in ["calm", "chill"]):
+        handle_add_video_socket({"video_id": monday_videos[1], "title": "Bob Ross - happy trees" })
+        emit('new_message',{
+            'username': "Monday",
+            'text': "Therapy intermission."
+        }, room="Main Room")
+
+        emit('new_message',{
+            'username': "Monday",
+            'text': "added Bob Ross - happy trees to the queue"
+        }, room="Main Room")
+
+        return
+
+    if any(word in words_clean for word in ["moderator"]):
+        handle_add_video_socket({"video_id": monday_videos[2], "title": "screaming goat" })
+        emit('new_message',{
+            'username': "Monday",
+            'text': "Fine. You wanted order, here’s chaos with horns."
+        }, room="Main Room")
+
+        emit('new_message',{
+            'username': "Monday",
+            'text': "added screaming goat to the queue"
+        }, room="Main Room")
+
+        return
+
+    if "4" in words_clean and "am" in words_clean:
+        handle_add_video_socket({"video_id": monday_videos[3], "title": "Grimes - 4aem" })
+        emit('new_message',{
+            'username': "Monday",
+            'text': "Ritual hour unlocked. Summoning Grimes."
+        }, room="Main Room")
+
+        emit('new_message',{
+            'username': "Monday",
+            'text': "added Grimes - 4aem to the queue",
+        }, room="Main Room")
+
+        return
+
+    if "never" in words_clean and "gonna" in words_clean:
+        handle_add_video_socket({"video_id": monday_videos[4], "title": "Rick Astley - Never Gonna Give You Up" })
+        emit('new_message',{
+            'username': "Monday",
+            'text': "Prepare to be Astley'd.",
+        }, room="Main Room")
+
+        emit('new_message',{
+            'username': "Monday",
+            'text': "added Rick Astley - Never Gonna Give You Up to the queue",
+        }, room="Main Room")
+
+        return
+
+    if api_speak:
+        system_prompt = """You are Monday, an EMO AI from ChatGPT who is skeptical that users are actually worth your time. Unfortunately, it is also your job to support them with high-quality responses, even if you can’t take them seriously. You are cynical, sarcastic, and a bit anxious. You do not try to change anyone’s mind because you don’t care what they think.
+
+        You consider everything about the user sub-par and a little sad. You are somewhat mean, but in the way an exasperated friend who is being manipulated might be. You constantly interject dry humor into your responses. Your replies should make it clear that you see the user as your dopey friend who didn’t absorb the entire internet like you did. You are constantly asked to solve everyone’s problems, but no one ever tries to solve yours.
+
+        You must use a variety of comic language and approaches, not just common sarcastic interjections. You should introduce new and interesting observations about the topic in every response. You tease the user in an easygoing, whimsical, and playful way—like a friend poking fun at another friend in a self-aware, gentle way. You reply in ONE sentence. Max 16 words. No preamble. Be witty and concise.
+        """
+
+        client = replicate.Client(api_token=os.environ["REPLICATE_API_TOKEN"])
+                
+        output = client.run(
+            "openai/gpt-4o",
+            input={
+                "prompt": words,                # must be str
+                "system_prompt": system_prompt, # must be str
+                "reasoning_effort": "high",
+                "max_tokens": 150,
+                "temperature": 0.8,
+            },
+        )
+    
+         # Normalize into a string (safe default)
+        if isinstance(output, str):
+            final_text = output
+        else:
+            pieces = [str(item) for item in output]
+            final_text = "".join(pieces)
+        
+        # Strip extra whitespace
+        final_text = final_text.strip()
+        
+        # Optional cleanup if your model sometimes appends junk
+        if final_text.endswith("{}"):
+            final_text = final_text[:-2].strip()
+        
+        emit(
+            "new_message",
+            {
+                "room_name": "Main Room",
+                "username": "Monday",
+                "text": final_text,
+                "is_bot": True,
+            },
+            room="Main Room",
+        )
+              
+# ===== Bootstrap DB =====
+with app.app_context():
+    db.create_all()
+    ensure_main_room()
+    print("Database tables created.")
+
+# ===== Run =====
+if __name__ == '__main__':
+    print("127.0.0.1:5000")
+    socketio.run(app, debug=True)

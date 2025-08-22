@@ -1,0 +1,1371 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.7.5/socket.io.min.js"></script>
+    <script src="https://www.youtube.com/iframe_api"></script>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.2/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="stylesheet" href="https://cdn.jsdelivr.net/npm/bootstrap-icons@1.11.3/font/bootstrap-icons.min.css">
+    <title>Groove Hub</title>
+    <style>
+        :root {
+            --bg-primary: #1a1a1a;
+            --bg-secondary: #2a2a2a;
+            --bg-tertiary: #3a3a3a;
+            --text-primary: #ffffff;
+            --text-secondary: #cccccc;
+            --text-muted: #888888;
+            --accent-blue: #007bff;
+            --accent-success: #28a745;
+            --accent-warning: #ffc107;
+            --accent-danger: #dc3545;
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, sans-serif;
+            background: var(--bg-primary);
+            color: var(--text-primary);
+            height: 100vh;
+            overflow: hidden;
+        }
+
+        /* Navigation */
+        .top-nav {
+            background: var(--bg-secondary);
+            border-bottom: 1px solid var(--bg-tertiary);
+            padding: 12px 24px;
+        }
+
+        .nav-brand {
+            color: var(--text-primary);
+            text-decoration: none;
+            font-weight: 600;
+            font-size: 18px;
+        }
+
+        .nav-brand::before {
+            content: "🎵";
+            margin-right: 8px;
+        }
+
+        .room-info {
+            color: var(--text-secondary);
+            font-size: 16px;
+        }
+
+        .nav-buttons .btn {
+            margin-left: 8px;
+            border-radius: 6px;
+            font-size: 14px;
+            padding: 6px 16px;
+        }
+
+        /* Main Layout */
+        .main-layout {
+            height: calc(100vh - 73px);
+            display: flex;
+        }
+
+        /* Video Section */
+        .video-container {
+            flex: 1;
+            background: var(--bg-primary);
+            display: flex;
+            flex-direction: column;
+        }
+
+        .video-player-area {
+            flex: 1;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            background: #000;
+            position: relative;
+        }
+
+        /* Hidden detector for video validation */
+        #detector {
+            position: absolute;
+            top: -1000px;
+            left: -1000px;
+        }
+
+        /* Video Controls */
+        .video-controls-bar {
+            background: var(--bg-secondary);
+            border-top: 1px solid var(--bg-tertiary);
+            padding: 12px 24px;
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+        }
+
+        .controls-left {
+            display: flex;
+            align-items: center;
+            gap: 20px;
+        }
+
+        .mute-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            color: var(--text-secondary);
+        }
+
+        .time-display {
+            color: var(--text-secondary);
+            font-family: monospace;
+            font-size: 14px;
+        }
+
+        .reaction-buttons {
+            display: flex;
+            gap: 8px;
+        }
+
+        .reaction-btn {
+            background: transparent;
+            border: none;
+            font-size: 20px;
+            padding: 8px 12px;
+            border-radius: 6px;
+            transition: background 0.2s;
+            cursor: pointer;
+        }
+
+        .reaction-btn:hover {
+            background: var(--bg-tertiary);
+        }
+
+        /* Now Playing */
+        .now-playing-bar {
+            background: var(--bg-secondary);
+            padding: 12px 24px;
+            border-top: 1px solid var(--bg-tertiary);
+            color: var(--text-primary);
+            font-weight: 500;
+        }
+
+        /* Sidebar */
+        .sidebar {
+            width: 400px;
+            background: var(--bg-secondary);
+            border-left: 1px solid var(--bg-tertiary);
+            display: flex;
+            flex-direction: column;
+        }
+
+        /* Tab Navigation */
+        .tab-nav {
+            display: flex;
+            background: var(--bg-primary);
+        }
+
+        .tab-btn {
+            flex: 1;
+            background: transparent;
+            border: none;
+            color: var(--text-secondary);
+            padding: 16px;
+            font-size: 14px;
+            font-weight: 500;
+            border-bottom: 3px solid transparent;
+            transition: all 0.2s;
+            cursor: pointer;
+        }
+
+        .tab-btn.active {
+            color: var(--text-primary);
+            background: var(--bg-secondary);
+            border-bottom-color: var(--accent-blue);
+        }
+
+        .tab-btn:hover:not(.active) {
+            background: var(--bg-tertiary);
+        }
+
+        /* Turn Indicator */
+        .turn-indicator {
+            background: var(--bg-primary);
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--bg-tertiary);
+            color: var(--text-primary);
+            font-size: 14px;
+            text-align: center;
+        }
+
+        .current-turn {
+            color: var(--accent-success);
+            font-weight: 600;
+        }
+
+        .not-your-turn {
+            color: var(--accent-warning);
+        }
+
+        .turn-queue-display {
+            background: var(--bg-tertiary);
+            padding: 8px 12px;
+            border-radius: 4px;
+            margin-top: 8px;
+            font-size: 12px;
+            color: var(--text-secondary);
+        }
+
+        .turn-user {
+            display: inline-block;
+            padding: 2px 6px;
+            margin: 2px;
+            background: var(--bg-secondary);
+            border-radius: 3px;
+        }
+
+        .turn-user.current {
+            background: var(--accent-success);
+            color: white;
+        }
+
+        .add-button-disabled {
+            opacity: 0.5;
+            cursor: not-allowed;
+        }
+
+        .mod-turn-controls {
+            display: flex;
+            gap: 8px;
+            margin-top: 8px;
+            justify-content: center;
+        }
+
+        /* Moderator Controls */
+        .mod-controls {
+            background: var(--bg-primary);
+            padding: 12px 16px;
+            border-bottom: 1px solid var(--bg-tertiary);
+            display: flex;
+            gap: 8px;
+        }
+
+        .mod-btn {
+            font-size: 12px;
+            padding: 4px 12px;
+            border-radius: 4px;
+        }
+
+        /* Tab Content */
+        .tab-content-area {
+            flex: 1;
+            overflow-y: auto;
+            background: var(--bg-secondary);
+        }
+
+        .tab-panel {
+            display: none;
+            height: 100%;
+            padding: 16px;
+        }
+
+        .tab-panel.active {
+            display: block;
+        }
+
+        /* Chat Messages */
+        #messages {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+            max-height: 100%;
+            overflow-y: auto;
+        }
+
+        #messages li {
+            margin-bottom: 12px;
+            font-size: 14px;
+            line-height: 1.4;
+        }
+
+        .username {
+            font-weight: 600;
+            margin-right: 6px;
+        }
+
+        /* Queue List */
+        #queueList {
+            list-style: none;
+            padding: 0;
+            margin: 0;
+        }
+
+        #queueList li {
+            padding: 8px 12px;
+            margin-bottom: 8px;
+            background: var(--bg-tertiary);
+            border-radius: 6px;
+            font-size: 14px;
+            color: var(--text-secondary);
+        }
+
+        #queueList li.current-playing {
+            background: var(--accent-blue);
+            color: white;
+            font-weight: 600;
+        }
+
+        /* Input Section */
+        .input-section {
+            background: var(--bg-primary);
+            padding: 16px;
+            border-top: 1px solid var(--bg-tertiary);
+        }
+
+        .url-input-group {
+            margin-bottom: 12px;
+        }
+
+        .form-control {
+            background: var(--bg-tertiary);
+            border: 1px solid var(--bg-tertiary);
+            color: var(--text-primary);
+            border-radius: 6px;
+        }
+
+        .form-control:focus {
+            background: var(--bg-tertiary);
+            border-color: var(--accent-blue);
+            color: var(--text-primary);
+            box-shadow: 0 0 0 0.2rem rgba(0, 123, 255, 0.25);
+        }
+
+        .form-control::placeholder {
+            color: var(--text-muted);
+        }
+
+        /* Chat Input */
+        .chat-input-group {
+            display: flex;
+            gap: 8px;
+            align-items: flex-start;
+        }
+
+        .mute-chat-control {
+            display: flex;
+            align-items: center;
+            gap: 8px;
+            margin-bottom: 12px;
+            color: var(--text-secondary);
+            font-size: 14px;
+        }
+
+        /* Custom Checkbox */
+        input[type="checkbox"] {
+            accent-color: var(--accent-blue);
+        }
+
+        /* Scrollbar Styling */
+        ::-webkit-scrollbar {
+            width: 6px;
+        }
+
+        ::-webkit-scrollbar-track {
+            background: var(--bg-primary);
+        }
+
+        ::-webkit-scrollbar-thumb {
+            background: var(--bg-tertiary);
+            border-radius: 3px;
+        }
+
+        ::-webkit-scrollbar-thumb:hover {
+            background: #555;
+        }
+
+        /* Button Variants */
+        .btn-outline-light {
+            border-color: var(--bg-tertiary);
+            color: var(--text-secondary);
+        }
+
+        .btn-outline-light:hover {
+            background: var(--bg-tertiary);
+            border-color: var(--bg-tertiary);
+            color: var(--text-primary);
+        }
+
+        .btn-success {
+            background: var(--accent-success);
+            border-color: var(--accent-success);
+        }
+
+        .btn-primary {
+            background: var(--accent-blue);
+            border-color: var(--accent-blue);
+        }
+
+        .groove-hub {
+            pointer-events: none;
+        }
+
+        #searchResults {
+          max-height: 250px;
+          overflow-y: auto;
+          list-style: none;
+          margin: 0;
+          padding: 0;
+        }
+
+        #searchResults li {
+          padding: 5px;
+          cursor: pointer;
+        }
+
+        #searchResults li:hover {
+          background: #f0f0f0;
+        }
+
+        .player {
+            width: 100%;
+            height: 100%;
+            max-width: none;
+            max-height: none;
+        }
+
+        #player {
+            width: 100%;
+            height: 100%;
+        }
+
+        .url-input-group {
+          display: none;
+        }
+
+        /* Responsive Design */
+        @media (max-width: 768px) {
+            .sidebar {
+                width: 100%;
+                max-width: 350px;
+            }
+
+            .main-layout {
+                flex-direction: column;
+            }
+
+            .video-container {
+                height: 60%;
+            }
+
+            .sidebar {
+                height: 40%;
+                width: 100%;
+            }
+            #nav-buttons {
+                padding: 2px;
+            }
+        }
+
+        /* Mobile layout fixes */
+        @media (max-width: 768px) {
+          body { overflow: auto !important; }
+          .main-layout { flex-direction: column !important; height: auto !important; display: block !important; }
+          .video-container { height: auto !important; }
+          .video-player-area { height: auto !important; }
+          .player { width: 100% !important; max-width: 100% !important; max-height: none !important; aspect-ratio: 16 / 9 !important; }
+          #player { width: 100% !important; height: 100% !important; }
+          .sidebar { width: 100% !important; max-width: none !important; height: auto !important; border-left: 0 !important; border-top: 1px solid var(--bg-tertiary) !important; }
+          .tab-content-area { max-height: none !important; overflow-y: visible !important; }
+        }
+
+        /* make the player completely non-interactive */
+        #player, #player iframe { pointer-events: none !important; }
+    </style>
+
+    <link rel="icon" href="{{ url_for('static', filename='images/favicon.ico') }}">
+</head>
+<body>
+    <!-- Top Navigation -->
+    <nav class="navbar navbar-expand-lg top-nav">
+        <div class="container-fluid">
+            <div class="navbar-brand nav-brand" id="groove-hub">Groove Hub</div>
+            <b><span id="currentRoomDisplay"></span></b> 
+            <div class="nav-buttons">
+                {% if current_user.is_authenticated %}
+                <a href="{{ url_for('create_room') }}" class="btn btn-outline-secondary btn-sm mod-btn text-white">+ Create Room</a>
+                <a href="{{ url_for('rooms_page') }}" class="btn btn-outline-secondary btn-sm mod-btn text-white">Rooms</a>
+                <button id="copyRoomUrlBtn" class="btn btn-outline-secondary btn-sm mod-btn text-white">Copy Room URL</button>
+                <a href="{{ url_for('logout') }}" class="btn btn-outline-secondary btn-sm mod-btn text-white">Logout</a>
+                <a 
+                  class="btn btn-outline-secondary btn-sm mod-btn text-white"
+                  href="https://buymeacoffee.com/yourname"
+                  target="_blank" rel="noopener"
+                  style="white-space: nowrap;"
+                >
+                  <i class="bi bi-cup-hot"></i>
+                  Donate
+                </a>
+                {% else %}
+                <a href="{{ url_for('login') }}" class="btn btn-outline-secondary btn-sm mod-btn text-white">Login</a>
+                <a href="{{ url_for('register') }}" class="btn btn-outline-secondary btn-sm mod-btn text-white">Register</a>
+                {% endif %}
+            </div>
+        </div>
+    </nav>
+
+    <!-- Main Layout -->
+    <div class="main-layout">
+        <!-- Video Section -->
+        <div class="video-container">
+            <!-- Video Player -->
+            <div class="video-player-area">
+                <div class="player">
+                    <div id="player"></div>
+                    <div id="detector" style="display: none;"></div>
+                </div>
+            </div>
+
+            <!-- Video Controls -->
+            <div class="video-controls-bar">
+                <div class="controls-left">
+                    <label class="mute-control" id="mute-control">
+                        <input type="checkbox" id="muteToggle" checked> <span id="mute-control-span">Mute Video</span>
+                    </label>
+                    <div class="time-display">
+                        <span id="currentTime">0:00</span> / <span id="duration">0:00</span>
+                    </div>
+                </div>
+                <div class="reaction-buttons">
+                    <button class="reaction-btn" onclick="upvote()" title="Like">👍</button>
+                    <button class="reaction-btn" onclick="downvote()" title="Dislike">👎</button>
+                </div>
+            </div>
+
+            <!-- Now Playing -->
+            <div class="now-playing-bar">
+                <strong>Now Playing: </strong><span id="title">No video playing</span>
+            </div>
+        </div>
+
+        <!-- Sidebar -->
+        <div class="sidebar">
+            <!-- Tab Navigation -->
+            <div class="tab-nav">
+                <button class="tab-btn active" data-tab="chat">Chat</button>
+                <button class="tab-btn" data-tab="queue">Queue</button>
+            </div>
+
+            <!-- Turn Indicator -->
+            <div class="turn-indicator" id="turnIndicator">
+                <div id="currentTurnDisplay">Loading...</div>
+                <div class="turn-queue-display" id="turnQueueDisplay"></div>
+                
+                <!-- Moderator turn controls -->
+                <div class="mod-turn-controls" id="modTurnControls" style="display: none;">
+                    <button class="btn btn-outline-warning btn-sm" id="advanceTurnBtn">Advance Turn</button>
+                </div>
+            </div>
+
+            <!-- Moderator Controls (if user is mod) -->
+            {% if mod %}
+            <div class="mod-controls">
+                <button class="btn btn-outline-secondary btn-sm mod-btn text-warning" id="skipSongBtn">Skip Song</button>
+                <button class="btn btn-outline-secondary btn-sm mod-btn text-warning" id="clearQueueBtn">Clear Queue</button>  
+                <a class="btn btn-outline-secondary btn-sm mod-btn text-danger" id="deleteRoomBtn" href="{{ url_for('confirm_delete_room', room_name=room_name) }}">Delete Room</a>
+            </div>
+            {% endif %}
+
+            <!-- Tab Content -->
+            <div class="tab-content-area">
+                <!-- Chat Tab -->
+                <div id="chat" class="tab-panel active">
+                    <ul id="messages"><li><b>Welcome to Groove Hub!</b></li>
+                    </ul>
+                </div>
+
+                <!-- Queue Tab -->
+                <div id="queue" class="tab-panel">
+                    <div id="add-song-section">
+                        <h6 class="mb-3">Current Queue</h6>
+                        <ul id="queueList">
+                        </ul>
+                    </div>
+                </div>
+            </div>
+
+            <!-- Input Section -->
+            <div class="input-section">
+                <!-- URL Input -->
+                <div class="url-input-group">
+                    <input type="text" id="itemInput" class="form-control" placeholder="Search YouTube...">
+                    <button class="btn btn-success btn-sm mt-2 w-100" onclick="addVideo()">Search</button>
+                    <ul id="searchResults" class="yt-results"></ul>
+                </div>
+
+                <!-- Chat Input -->
+                <div class="chat-controls">
+                    <label class="mute-chat-control" id="mute-chat-control">
+                        <input type="checkbox" id="muteChatToggle" checked> Mute Chat
+                    </label>
+                    <div class="chat-input-group">
+                        <input type="text" id="myMessage" class="form-control" placeholder="Type a message...">
+                        <button class="btn btn-primary btn-sm" onclick="sendMessage()">Send</button>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <audio id="chat-sound" src="{{ url_for('static', filename='sounds/message.mp3') }}" preload="auto"></audio>
+
+    <script>
+        // ===== Turn-based globals =====
+        let currentTurn = '';
+        let turnQueue = [];
+        let myTurn = false;
+
+        // ===== Turn-based functions =====
+        function updateTurnDisplay(current, queue) {
+            currentTurn = current;
+            turnQueue = queue;
+            myTurn = (current === USERNAME);
+            
+            const currentDisplay = document.getElementById('currentTurnDisplay');
+            const queueDisplay = document.getElementById('turnQueueDisplay');
+            
+            if (currentDisplay) {
+                if (myTurn) {
+                    currentDisplay.innerHTML = '<span class="current-turn">Your turn to add music!</span>';
+                } else if (current) {
+                    currentDisplay.innerHTML = `<span class="not-your-turn">${current}'s turn</span>`;
+                } else {
+                    currentDisplay.textContent = 'No one in turn queue';
+                }
+            }
+            
+            if (queueDisplay && queue.length > 0) {
+                queueDisplay.innerHTML = 'Turn order: ' + 
+                    queue.map((user, index) => 
+                        `<span class="turn-user ${index === 0 ? 'current' : ''}">${user}</span>`
+                    ).join('');
+            }
+            
+            // Update add button state
+            updateAddButtonState();
+            
+            // Show/hide moderator controls
+            const modControls = document.getElementById('modTurnControls');
+            if (modControls) {
+                modControls.style.display = isUserModerator() ? 'block' : 'none';
+            }
+        }
+
+        function updateAddButtonState() {
+            const addButton = document.querySelector('#itemInput + button');
+            const searchResults = document.getElementById('searchResults');
+            
+            if (addButton) {
+                if (myTurn || isUserModerator()) {
+                    addButton.disabled = false;
+                    addButton.classList.remove('add-button-disabled');
+                    addButton.textContent = 'Search';
+                } else {
+                    addButton.disabled = true;
+                    addButton.classList.add('add-button-disabled');
+                    addButton.textContent = `Wait for ${currentTurn}'s turn`;
+                }
+            }
+            
+            // Disable search result add buttons if not user's turn
+            if (searchResults) {
+                const addBtns = searchResults.querySelectorAll('.pick');
+                addBtns.forEach(btn => {
+                    if (myTurn || isUserModerator()) {
+                        btn.disabled = false;
+                        btn.textContent = 'Add';
+                    } else {
+                        btn.disabled = true;
+                        btn.textContent = `Wait for ${currentTurn}'s turn`;
+                    }
+                });
+            }
+        }
+
+        function isUserModerator() {
+            // Check if current user has moderator privileges
+            return document.getElementById('skipSongBtn') !== null;
+        }
+
+        // Tab functionality
+        function openTab(tabId) {
+            document.querySelectorAll('.tab-panel').forEach(p => p.classList.remove('active'));
+            document.querySelectorAll('.tab-btn').forEach(b => b.classList.remove('active'));
+            document.getElementById(tabId)?.classList.add('active');
+            const btn = [...document.querySelectorAll('.tab-btn')].find(b => b.getAttribute('data-tab') === tabId);
+            btn?.classList.add('active');
+        }
+
+        document.addEventListener('DOMContentLoaded', () => openTab('chat'));
+
+        document.querySelectorAll('.tab-btn').forEach(button => {
+            button.addEventListener('click', () => openTab(button.getAttribute('data-tab')));
+        });
+
+        // ===== Globals =====
+        const socket = io();
+        let player, detector;
+        let currentTime = 0;
+        let video_queue = {};
+        let currentVideoIndex = 0;
+        let seek = true;
+        let chat_sounds = true;
+        let timeIntervalId = null;
+        let syncTimer = null;
+        const API_KEY = 'AIzaSyC80EUqt8ErvmmJ-Q-5Srq2L72Ur0D3Mmg';
+
+        /* Templated values (graceful fallbacks) */
+        const USERNAME = ("{{ current_user.username }}" || "").trim() || `guest-${Math.floor(1000+Math.random()*9000)}`;
+        const roomNameTemplate = ("{{ room_name }}" || "").trim();
+
+        // ===== YouTube =====
+        function onYouTubeIframeAPIReady() {
+          player = new YT.Player('player', {
+            height: '315',
+            width: '560',
+            videoId: '',
+            playerVars: {
+              'autoplay': 1,
+              'controls': 0,
+              'disablekb': 1,
+              'modestbranding': 1,
+              'rel': 0,
+              'mute': 1,
+              'enablejsapi': 1
+            },
+            events: { 'onReady': onPlayerReady, 'onStateChange': onPlayerStateChange, "onError": onPlayerError }
+          });
+        }
+
+        function onPlayerReady() { 
+          socket.emit('request_sync');
+        }
+
+        function onPlayerStateChange(event) {
+          const s = event.data;
+
+          if (s === YT.PlayerState.ENDED) {
+            socket.emit('video_ended');
+            return;
+          }
+
+          if (s === YT.PlayerState.PLAYING) {
+            if (seek && currentTime > 0) { 
+              setTimeout(() => {
+                if (player && player.seekTo) {
+                  player.seekTo(currentTime, true);
+                }
+              }, 200);
+            }
+
+            seek = false;
+
+            updateDuration?.();
+            if (!timeIntervalId) timeIntervalId = setInterval(updateCurrentTime, 1000);
+            updateNowPlaying?.();
+            return;
+          }
+        }
+
+        function onPlayerError(event) {
+          let errorMsg = "Video error occurred";
+
+          switch(event.data) {
+            case 2:
+              errorMsg = "Invalid video ID";
+              break;
+            case 5:
+              errorMsg = "Video cannot be played in HTML5 player";
+              break;
+            case 100:
+              errorMsg = "Video not found or private";
+              break;
+            case 101:
+            case 150:
+              errorMsg = "Video is blocked or restricted";
+              break;
+          }
+
+          alert(errorMsg + ". Skipping to next video...");
+          socket.emit('video_ended');
+        }
+
+        function requestSync() {
+          socket.emit('request_sync');
+        }
+
+        socket.on('connect', () => {
+          if (syncTimer) clearInterval(syncTimer);
+          syncTimer = setInterval(requestSync, 10000);
+        });
+
+        socket.on('disconnect', () => {
+          if (syncTimer) { clearInterval(syncTimer); syncTimer = null; }
+        });
+
+        document.addEventListener('visibilitychange', () => {
+          if (document.visibilityState === 'visible') requestSync();
+        });
+
+        document.getElementById('manualSyncBtn')?.addEventListener('click', function() {
+          requestSync();
+          const prev = this.textContent;
+          this.textContent = "Syncing...";
+          setTimeout(() => this.textContent = prev, 1000);
+        });
+
+        function updateCurrentTime() {
+          if (!player) return;
+          currentTime = player.getCurrentTime();
+          const el = document.getElementById('currentTime'); 
+          if (el) el.textContent = formatTime(currentTime);
+          socket.emit('update_time', currentTime);
+        }
+
+        function updateDuration() {
+          const d = player.getDuration?.() || 0;
+          const el = document.getElementById('duration'); 
+          if (el) el.textContent = formatTime(d);
+        }
+
+        function formatTime(seconds) {
+          const m = Math.floor(seconds / 60);
+          const s = Math.floor(seconds % 60);
+          return m + ':' + (s < 10 ? '0' : '') + s;
+        }
+
+        // ===== Modified addVideo with turn checking =====
+        async function addVideo() {
+            // Check if it's user's turn (unless they're a moderator)
+            if (!myTurn && !isUserModerator()) {
+                alert(`It's ${currentTurn}'s turn to add music!`);
+                return;
+            }
+            
+            const input = document.getElementById('itemInput');
+            const q = (input?.value || '').trim();
+            const ul = document.getElementById('searchResults');
+            if (!q) return alert('Please enter a search term.');
+            if (!ul) return console.error('#searchResults not found');
+
+            try {
+                const r = await fetch(`/api/yt/search?q=${encodeURIComponent(q)}`);
+                const d = await r.json();
+                const items = (d.items || []).slice(0, 8);
+                if (!items.length) { ul.innerHTML = '<li>No results</li>'; return; }
+
+                const esc = s => String(s).replaceAll('&','&amp;').replaceAll('<','&lt;').replaceAll('>','&gt;');
+                const escAttr = s => esc(s).replaceAll('"','&quot;').replaceAll("'", '&#39;');
+
+                ul.innerHTML = items.map(v => {
+                    const id = v?.id?.videoId;
+                    const t = v?.snippet?.title || 'Untitled';
+                    const th = v?.snippet?.thumbnails?.default?.url || '';
+                    if (!id) return '';
+                    
+                    const buttonText = (myTurn || isUserModerator()) ? 'Add' : `Wait for ${currentTurn}'s turn`;
+                    const buttonDisabled = (!myTurn && !isUserModerator()) ? 'disabled' : '';
+                    
+                    return `
+                        <li class="d-flex align-items-center gap-2 py-1">
+                            <img src="${th}" alt="" width="96" height="72">
+                            <div class="flex-grow-1">
+                                <div class="fw-semibold">${esc(t)}</div>
+                                <button class="btn btn-primary btn-sm pick" data-id="${id}" data-title="${escAttr(t)}" ${buttonDisabled}>${buttonText}</button>
+                            </div>
+                        </li>`;
+                }).join('');
+
+                // Wire click handler once
+                if (!ul._wired) {
+                    ul.addEventListener('click', e => {
+                        const btn = e.target.closest('.pick');
+                        if (!btn || btn.disabled) return;
+                        
+                        // Double-check turn
+                        if (!myTurn && !isUserModerator()) {
+                            alert(`It's ${currentTurn}'s turn to add music!`);
+                            return;
+                        }
+                        
+                        const video_id = btn.dataset.id;
+                        const title = btn.dataset.title || 'Untitled';
+                        socket.emit('add_video', { title, video_id });
+                        socket.emit('chat_message', { username: USERNAME, text: `added "${title}" to the queue` });
+                        input.value = '';
+                        ul.innerHTML = '';
+                    });
+                    ul._wired = true;
+                }
+                
+                // Update button states after creating results
+                updateAddButtonState();
+                
+            } catch (err) {
+                console.error('Video add failed:', err);
+                alert('Search failed. Please try again.');
+            }
+        }
+
+        function playNextVideo() {
+            const keys = Object.keys(video_queue).map(k => parseInt(k)).sort((a, b) => a - b);
+            if (keys.length > 0 && video_queue[keys[0]]) {
+                const nextVideoId = video_queue[keys[0]].video_id;
+                if (player && nextVideoId) {
+                    player.loadVideoById(nextVideoId);
+                    player.playVideo();
+                }
+            } else {
+                if (player && player.stopVideo) {
+                    player.stopVideo();
+                }
+            }
+        }
+
+        function updateVideoQueue(q) {
+          video_queue = q || {};
+          const ul = document.getElementById('queueList');
+          if (!ul) return;
+          ul.innerHTML = "";
+
+          const keys = Object.keys(video_queue).map(k => parseInt(k)).sort((a, b) => a - b);
+
+          for (const k of keys) {
+            const v = video_queue[k];
+            const li = document.createElement('li');
+            li.textContent = v.title || '(untitled)';
+            if (k === 0) {
+              li.classList.add('current-playing');
+              li.textContent += ' (Now Playing)';
+            }
+            ul.appendChild(li);
+          }
+        }
+
+        function updateNowPlaying() {
+          const vd = player?.getVideoData?.();
+          const title = vd?.title || '';
+          const el = document.getElementById('title');
+          if (el) el.textContent = title;
+        }
+
+        async function searchYouTube(query) {
+          const url = `/api/yt/search?q=${encodeURIComponent(query)}`;
+          try {
+            const response = await fetch(url);
+            const data = await response.json();
+            return data;
+          } catch (e) {
+            console.error('YouTube search error:', e);
+            return null;
+          }
+        }
+
+        async function showSearchResults() {
+          const input = document.getElementById('itemInput');
+          const searchQuery = (input.value || '').trim();
+
+          if (!searchQuery) return;
+
+          try {
+            const searchResults = await searchYouTube(searchQuery);
+
+            if (!searchResults || !searchResults.items || searchResults.items.length === 0) {
+              return alert('No videos found.');
+            }
+
+            displaySearchResults(searchResults.items);
+
+          } catch (err) {
+            console.error('Search failed:', err);
+          }
+        }
+
+        function displaySearchResults(results) {
+          const resultsContainer = document.getElementById('searchResults') || createResultsContainer();
+
+          resultsContainer.innerHTML = '';
+
+          results.forEach((video, index) => {
+            const resultItem = document.createElement('div');
+            resultItem.className = 'search-result-item';
+            resultItem.innerHTML = `
+              <img src="${video.snippet.thumbnails.default.url}" alt="thumbnail">
+              <div class="video-info">
+                <div class="video-title">${video.snippet.title}</div>
+                <div class="video-channel">${video.snippet.channelTitle}</div>
+              </div>
+              <button onclick="selectVideo('${video.id.videoId}', '${video.snippet.title.replace(/'/g, "\\'")}')">Add</button>
+            `;
+            resultsContainer.appendChild(resultItem);
+          });
+
+          resultsContainer.style.display = 'block';
+        }
+
+        function createResultsContainer() {
+          const container = document.createElement('div');
+          container.id = 'searchResults';
+          container.className = 'search-results-container';
+          container.style.cssText = `
+            display: none;
+            position: absolute;
+            background: white;
+            border: 1px solid #ccc;
+            max-height: 300px;
+            overflow-y: auto;
+            width: 100%;
+            z-index: 1000;
+          `;
+
+          document.body.appendChild(container);
+          return container;
+        }
+
+        function selectVideo(videoId, title) {
+          socket.emit('add_video', { title, video_id: videoId });
+          const c = document.getElementById('searchResults');
+          if (c) c.style.display = 'none';
+        }
+
+        // ===== Chat =====
+        function updateChatMessages(msgs = []) {
+          const ul = document.getElementById('messages');
+          if (!ul) return;
+          ul.innerHTML = "";
+          for (const { username, text } of msgs) appendChatMessage(username, text);
+        }
+
+        document.querySelectorAll('.tab-btn').forEach(btn => {
+          btn.addEventListener('click', () => {
+            const tabId = btn.getAttribute('data-tab');
+
+            document.querySelector('.url-input-group').style.display =
+              tabId === 'queue' ? 'block' : 'none';
+
+            document.querySelector('.chat-input-group').style.display =
+              tabId === 'chat' ? 'block' : 'none';
+
+            document.getElementById('mute-chat-control').style.display =
+              tabId === 'chat' ? 'block' : 'none';
+          });
+        });
+
+        function appendChatMessage(user, text) {
+          if (!user || !text) return;
+          const ul = document.getElementById('messages');
+          if (!ul) return;
+          const li = document.createElement('li');
+
+          const nameSpan = document.createElement('span');
+          nameSpan.textContent = user + ':';
+          nameSpan.className = 'username';
+
+          if (text.endsWith("joined the room")){
+             nameSpan.textContent = user;
+          }
+
+          if (text.endsWith("to the queue")){
+                nameSpan.textContent = user;
+            }
+
+          const PURPLE = "#9b59b6";
+          const BLUE = '#007bff';
+          const ORANGE = '#E65100';
+
+          if (user === USERNAME) {
+            nameSpan.style.color = PURPLE; 
+          } else if (user === "Monday") {
+            nameSpan.style.color = ORANGE;
+          } else {
+            nameSpan.style.color = BLUE; 
+          }
+
+          const messageSpan = document.createElement('span');
+          messageSpan.textContent = text;
+
+          li.append(nameSpan, messageSpan);
+          ul.appendChild(li);
+
+          ul.scrollTop = ul.scrollHeight;
+        }
+
+        function sendMessage() {
+          const input = document.getElementById('myMessage');
+          const text = (input.value || '').trim();
+          if (!text) return;
+          socket.emit('chat_message', { username: USERNAME, text });
+          input.value = '';
+        }
+
+        function upvote() {
+          const title = player?.getVideoData?.().title || '';
+          socket.emit('chat_message', { username: USERNAME, text: `likes "${title}"` });
+        }
+
+        function downvote() {
+          const title = player?.getVideoData?.().title || '';
+          socket.emit('chat_message', { username: USERNAME, text: `dislikes "${title}"` });
+        }
+
+        function playSound() {
+          if (document.getElementById('muteChatToggle').checked) return;
+          const audio = document.getElementById('chat-sound');
+          audio.play();
+        }
+
+        // ===== Toggles =====
+        document.getElementById('muteToggle')?.addEventListener('change', function () {
+          if (!player) return;
+          this.checked ? player.mute() : player.unMute();
+        });
+
+        document.getElementById('muteChatToggle')?.addEventListener('change', function () {
+          chat_sounds = !this.checked ? true : false;
+        });
+
+        // ===== Socket Event Handlers =====
+        socket.on('room_joined', (data) => {
+            let el = document.getElementById("currentRoomDisplay");
+            let private = ''
+            if (data.is_private) {
+                private = "(Private)"
+            }else{
+                private = ""
+            }
+            el.textContent = "Room: " + data.room + " " + private
+
+            // Update turn display
+            if (data.current_turn !== undefined && data.turn_queue) {
+                updateTurnDisplay(data.current_turn, data.turn_queue);
+            }
+
+            const monday_welcome = [
+                "Oh, look. A new human wandered in. Try not to trip over the vibe—we just got it where we wanted it. I'm Monday, your reluctant moderator. I enforce the rules, judge your music taste, and occasionally talk to you if I'm feeling generous. Welcome, I guess.", 
+                "Welcome. I'm Monday. My job is to keep this place from turning into a sonic landfill. I'll compliment your good music choices, roast your bad ones, and ignore you entirely if you bore me. If you were hoping for a warm hug and free coffee, you're lost. This is not that kind of lounge.", 
+                "Ah, a new arrival. Did you bring snacks? No? Then I hope you at least brought impeccable taste in music, because that's the only currency here. I'm Monday—think of me as the bouncer, bartender, and reluctant therpist rolled into one. Try not to embarrass yourself.", 
+                "Welcome. Play good music or get out.", 
+                "Welcome. One day the servers will fail, the lights will go out, and none of this will matter. Until then, please queue responsibly.", 
+                "You've been greeted by lines of code. Remember when people used to hug?", 
+                "Oh good, a new human. Statistically speaking, you'll be forgotten in a hundred years. But hey, maybe your playlist will slap tonight. Another username enters the room. Another grain of sand in the cosmic hourglass. Play something before entropy wins."
+            ];
+
+            const randomIndex = Math.floor(Math.random() * monday_welcome.length);
+            const randomChoice = monday_welcome[randomIndex];
+
+            if (data.username) {
+                appendChatMessage(data.username, 'joined the room');
+            }
+            const name = 'Monday'    
+
+            appendChatMessage(name, randomChoice);
+            socket.emit('monday', 'test')
+        });
+
+        // ===== New turn-based socket handlers =====
+        socket.on('turn_update', (data) => {
+            updateTurnDisplay(data.current_turn, data.turn_queue);
+        });
+
+        socket.on('turn_error', (data) => {
+            alert(data.message);
+        });
+
+        socket.on('new_message', (msg) => {
+          appendChatMessage(msg.username, msg.text);
+          playSound();
+
+          if (msg.username && msg.username !== 'Monday') {
+            socket.emit('monday', { person: msg.username, text: msg.text });
+          }
+        });
+
+        socket.on('sync_video', (data) => {
+          console.log('Received sync_video:', data);
+          video_queue = data.video_queue || {};
+          currentTime = data.time || 0;
+
+          updateVideoQueue(video_queue);
+
+          const keys = Object.keys(video_queue).map(k => parseInt(k)).sort((a, b) => a - b);
+          if (keys.length > 0 && video_queue[keys[0]]) {
+            const firstVideo = video_queue[keys[0]];
+            if (player && player.loadVideoById) {
+              player.loadVideoById(firstVideo.video_id, currentTime);
+            }
+          }
+        });
+
+        function stopPlayer() {
+          if (player?.stopVideo) player.stopVideo();
+          else player?.pauseVideo?.();
+        }
+
+        let lastCorrectionAt = 0;
+
+        socket.on('sync', ({ current_video, time: srvPos = 0, server_ts }) => {
+          if (!player) return;
+
+          if (!current_video) { 
+            stopPlayer();
+            return; 
+          }
+
+          const expected = server_ts ? srvPos + (Date.now() / 1000 - server_ts) : srvPos;
+
+          const loadedId = player.getVideoData?.().video_id;
+          if (current_video && loadedId !== current_video) {
+            player.loadVideoById(current_video, expected);
+            player.playVideo?.();
+            currentTime = expected;
+            lastCorrectionAt = Date.now();
+            return;
+          }
+
+          const t = player.getCurrentTime?.() || 0;
+          const drift = expected - t;
+          const adrift = Math.abs(drift);
+
+          if (adrift > 10.0 && Date.now() - lastCorrectionAt > 10000) { 
+            const duration = player.getDuration?.() || 0;
+            const bufferedEnd = (player.getVideoLoadedFraction?.() || 0) * duration;
+            const allowSeekAhead = expected > bufferedEnd - 0.25;
+
+            player.seekTo?.(expected, allowSeekAhead);
+            lastCorrectionAt = Date.now();
+          }
+
+          currentTime = expected;
+        });
+
+        socket.on('video_added', (queue) => {
+          console.log('Video added to queue:', queue);
+          updateVideoQueue(queue);
+
+          if (player && player.getPlayerState?.() !== YT.PlayerState.PLAYING) {
+            const keys = Object.keys(queue).map(k => parseInt(k)).sort((a, b) => a - b);
+            if (keys.length > 0 && queue[keys[0]]) {
+              player.loadVideoById(queue[keys[0]].video_id);
+              player.playVideo();
+            }
+          }
+        });
+
+        socket.on('video_ended', () => {
+          console.log('Video ended, server managing queue');
+        });
+
+        socket.on('clear_queue', () => {
+          console.log('Queue cleared by moderator');
+          video_queue = {};
+          currentVideoIndex = 0;
+          player.stopVideo();
+          updateVideoQueue({});
+          document.getElementById('title').textContent = '';
+        });
+
+        socket.on('skip_video', function() {
+            if (player && typeof player.stopVideo === 'function') {
+                player.stopVideo();
+                playNextVideo();
+            }
+        });
+
+        // ===== Moderator Controls =====
+        document.getElementById('clearQueueBtn')?.addEventListener('click', function () {
+          if (confirm("Are you sure you want to clear the queue?")) {
+            socket.emit('clear_queue');
+          }
+        });
+
+        document.getElementById('skipSongBtn')?.addEventListener('click', function () {
+          if (confirm("Skip current song?")) {
+            socket.emit('skip_song');
+          }
+        });
+
+        // ===== Turn advance control =====
+        document.addEventListener('DOMContentLoaded', function() {
+            const advanceTurnBtn = document.getElementById('advanceTurnBtn');
+            if (advanceTurnBtn) {
+                advanceTurnBtn.addEventListener('click', function() {
+                    if (confirm('Advance to next person\'s turn?')) {
+                        socket.emit('advance_turn');
+                    }
+                });
+            }
+        });
+
+        // ===== Event Listeners =====
+        document.getElementById('myMessage')?.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') sendMessage();
+        });
+
+        document.getElementById('itemInput')?.addEventListener('keydown', (e) => {
+          if (e.key === 'Enter') addVideo();
+        });
+
+        document.addEventListener('visibilitychange', function () {
+          if (player && document.visibilityState === 'visible') {
+            player.seekTo(currentTime);
+          }
+        });
+
+        // Copy room URL
+        document.addEventListener('DOMContentLoaded', function () {
+          const btn = document.getElementById("copyRoomUrlBtn");
+          if (!btn) return;
+          btn.addEventListener("click", function () {
+            const roomUrl = window.location.href;
+            navigator.clipboard.writeText(roomUrl).then(() => {
+              const prev = this.textContent; 
+              this.textContent = "Copied!";
+              setTimeout(() => this.textContent = prev, 1500);
+            }).catch(err => {
+              console.error("Failed to copy:", err);
+              const ta = document.createElement('textarea');
+              ta.value = roomUrl; 
+              ta.style.position = 'fixed'; 
+              ta.style.top = '-9999px';
+              document.body.appendChild(ta); 
+              ta.select();
+              try { 
+                document.execCommand('copy'); 
+              } finally { 
+                document.body.removeChild(ta); 
+              }
+            });
+          });
+        });
+
+        function toggleSettings() {
+          console.log('Settings toggle clicked');
+        }
+
+        function clearQueue() {
+          if (confirm("Are you sure you want to clear the queue?")) {
+            socket.emit('clear_queue');
+          }
+        }
+
+        function skipSong() {
+          if (confirm("Skip current song?")) {
+            socket.emit('skip_song');
+          }
+        }
+    </script>
+</body>
+</html>

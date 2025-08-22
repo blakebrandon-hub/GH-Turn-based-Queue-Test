@@ -1,0 +1,63 @@
+
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Groove Hub</title>
+    <audio id="chat-sound" src="{{ url_for('static', filename='sounds/message.mp3') }}" preload="auto"></audio>
+    <link rel="stylesheet" href="{{ url_for('static', filename='css/style.css') }}">
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link rel="icon" href="{{ url_for('static', filename='images/favicon.ico') }}">
+    <script src="https://cdnjs.cloudflare.com/ajax/libs/socket.io/4.5.3/socket.io.js"></script>
+    <script src="https://www.youtube.com/iframe_api"></script>
+</head>
+<body class="bg-dark text-white">
+
+  <!-- Navbar -->
+  <nav class="navbar d-flex align-items-center px-4 py-2 bg-dark border-bottom border-light">
+    <a href="{{ url_for('index') }}" class="navbar-brand text-white me-3">
+      🎵 Groove Hub
+    </a>
+
+    <a href="{{ url_for('create_room') }}" class="btn btn-outline-light btn-sm me-2">
+      + Create Room
+    </a>
+
+    <div class="ms-auto d-flex align-items-center gap-2">
+      <a href="{{ url_for('logout') }}" class="btn btn-dark">Logged in as: {{username}}</a>
+      <a href="{{ url_for('logout') }}" class="btn btn-outline-light btn-sm">Logout</a>
+    </div>
+  </nav>
+
+
+<div class="container py-4">
+  <div class="d-flex gap-1 justify-content-center flex-grow-1">
+    <div>
+      <h2 class="mb-4">Available Rooms</h2>
+      
+      {% for item in rooms_with_counts %}
+        <div class="room-item mb-3 p-3 border rounded text-center">
+          <h5>{{ item.room.name }}</h5>
+          <p class="text-light mb-2">
+            {{ item.user_count }} user{{ 's' if item.user_count != 1 else '' }} online
+          </p>
+          <a href="{{ url_for('join_room_page', room_name=item.room.name) }}" 
+             class="btn btn-outline-light btn-md">
+            Join Room
+          </a>
+        </div>
+      {% endfor %}
+      
+      {% if not rooms_with_counts %}
+        <p class="text-muted">No public rooms available.</p>
+      {% endif %}
+      
+    </div>
+  </div>
+</div>
+
+
+    <script src="{{ url_for('static', filename='js/script.js') }}"></script>
+</body>
+</html>
