@@ -629,8 +629,7 @@ def handle_add_video_socket(data):
     current_turn = get_current_turn(room_name)
     username = get_display_name()
     
-    # Allow Monday bot to bypass turn system
-    if username != 'Monday' and not user_can_moderate(current_user.id, room_name) and current_turn != username:
+    if not user_can_moderate(current_user.id, room_name) and current_turn != username:
         emit('turn_error', {
             'message': f"It's {current_turn}'s turn to add a video!",
             'current_turn': current_turn
@@ -662,11 +661,10 @@ def handle_add_video_socket(data):
                 'started_at': time(),
             }
         
-        # Advance to next person's turn (unless moderator override or Monday bot)
-        if username != 'Monday' and not user_can_moderate(current_user.id, room_name):
-            next_turn = advance_turn(room_name)
-        else:
-            next_turn = get_current_turn(room_name)
+    if not user_can_moderate(current_user.id, room_name):
+        next_turn = advance_turn(room_name)
+    else:
+        next_turn = get_current_turn(room_name)
         
         # Get updated queue in old format
         queue_items = get_queue_for_room(room_name)
