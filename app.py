@@ -164,8 +164,8 @@ def advance_turn(room_name):
     turn_queue = get_turn_queue(room_name)
     if turn_queue:
         # Move current person to end of queue
-        current_user = turn_queue.popleft()
-        turn_queue.append(current_user)
+        current_user_name = turn_queue.popleft()
+        turn_queue.append(current_user_name)
         save_turn_queue(room_name)
         return turn_queue[0] if turn_queue else None
     return None
@@ -176,6 +176,13 @@ def remove_user_from_turns(room_name, username):
     if username in turn_queue:
         turn_queue.remove(username)
         save_turn_queue(room_name)
+
+def broadcast_turn_update(room_name):
+    """Send the latest turn info to the whole room."""
+    socketio.emit('turn_update', {
+        'current_turn': get_current_turn(room_name),
+        'turn_queue': list(get_turn_queue(room_name))
+    }, room=room_name)
 
 # ===== Existing Helpers =====
 def get_display_name():
@@ -469,23 +476,27 @@ def on_connect():
     
     # Add user to turn rotation
     username = get_display_name()
-    add_user_to_turns(room_name, username)
+    added = add_user_to_turns(room_name, username)
     
     # Get room info including privacy status
     room = get_room_by_name(room_name)
     is_private = room.is_private if room else False
     
-    # Send turn info
+    # Send turn info to the connecting client
     current_turn = get_current_turn(room_name)
     turn_queue = list(get_turn_queue(room_name))
     
     emit('room_joined', {
         'room': room_name, 
         'username': username,
-        'is_private': private,
+        'is_private': is_private,  # NOTE: keeping scope correct for this emit
         'current_turn': current_turn,
         'turn_queue': turn_queue
     }, to=request.sid)
+
+    # Broadcast turn update if they were newly added
+    if added:
+        broadcast_turn_update(room_name)
 
 @socketio.on('join_room')
 def handle_join(data):
@@ -507,7 +518,7 @@ def handle_join(data):
         room = get_room_by_name(room_name)
     
     # Add user to turn rotation
-    add_user_to_turns(room_name, username)
+    added = add_user_to_turns(room_name, username)
     
     # Initialize chat for this room
     if room_name not in messages:
@@ -532,11 +543,10 @@ def handle_join(data):
         'current_video': current_video_id
     }, to=request.sid)
 
-    # Send turn info
+    # Send room info to this user
     current_turn = get_current_turn(room_name)
     turn_queue = list(get_turn_queue(room_name))
 
-    # Include privacy status in room_joined event
     emit('room_joined', {
         'room': room_name, 
         'username': username,
@@ -545,15 +555,20 @@ def handle_join(data):
         'turn_queue': turn_queue
     }, to=request.sid)
 
+    # Notify chat
     join_msg = {'username': '', 'text': f'{username} joined the room'}
     messages[room_name].append(join_msg)
     emit('new_message', join_msg, room=room_name)
 
+    # Broadcast that a user joined + updated turns
     emit('user_joined', {
         'username': username,
         'current_turn': current_turn,
         'turn_queue': turn_queue
     }, room=room_name)
+
+    if added:
+        broadcast_turn_update(room_name)
     
 @socketio.on('chat_message')
 def handle_chat_message(data):
@@ -631,13 +646,20 @@ def handle_add_video_socket(data):
     # Get room from session
     room_name = session.get('current_room') or MAIN_ROOM_NAME
     room = get_room_by_name(room_name)
-    
     if not room:
         return
     
-    # Check if it's this user's turn (unless they're a moderator or it's Monday)
-    current_turn = get_current_turn(room_name)
+    # Check turn (moderators bypass)
     username = get_display_name()
+    is_mod = user_can_moderate(current_user.id, room_name)
+    current_turn = get_current_turn(room_name)
+
+    if not is_mod and (current_turn is not None) and (username != current_turn):
+        # Not their turn; notify only this user
+        emit('turn_error', {
+            'message': f"Not your turn. It's {current_turn}'s turn."
+        }, to=request.sid)
+        return
     
     # Convert video_id to full URL
     video_url = f'https://www.youtube.com/watch?v={video_id}'
@@ -656,7 +678,6 @@ def handle_add_video_socket(data):
 
         # If this add created the first item in the room, start the clock
         count = QueueItem.query.filter_by(room_id=room.id).count()
-        
         if count == 1:
             room_clock[room_name] = {
                 'video_id': video_id,
@@ -671,12 +692,12 @@ def handle_add_video_socket(data):
         # Emit in old format that frontend expects
         socketio.emit('video_added', video_queue_old_format, room=room_name)
         
-        # Emit turn update
-        turn_queue = list(get_turn_queue(room_name))
-        socketio.emit('turn_update', {
-            'current_turn': next_turn,
-            'turn_queue': turn_queue
-        }, room=room_name)
+        # Advance the turn if this wasn't a moderator override
+        if not is_mod:
+            advance_turn(room_name)
+
+        # Broadcast fresh turn state
+        broadcast_turn_update(room_name)
         
     except Exception as e:
         db.session.rollback()
@@ -757,6 +778,9 @@ def handle_disconnect():
         leave_msg = {'username': '', 'text': f'{username} left the room'}
         messages[room_name].append(leave_msg)
         emit('new_message', leave_msg, room=room_name)
+
+        # Broadcast updated turn info
+        broadcast_turn_update(room_name)
 
         # Clean up
         del user_rooms[request.sid]
