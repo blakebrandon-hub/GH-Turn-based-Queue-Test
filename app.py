@@ -21,6 +21,7 @@ from collections import deque
 messages = {}          # room_id -> list of {username, text}
 user_rooms = {}        # sid -> room_name
 room_turn_queues = {}  # room_name -> deque of usernames for turn order
+room_added_users_this_song = {}
 MAIN_ROOM_NAME = "Main Room"
 API_KEY = 'AIzaSyC80EUqt8ErvmmJ-Q-5Srq2L72Ur0D3Mmg'
 
@@ -169,8 +170,8 @@ def broadcast_turn_update(room_name):
     }, room=room_name)
 
 def _start_song_window(room_name: str):
-    """New song just started; no head-advance has occurred yet this song."""
     room_advanced_this_song[room_name] = False
+    room_added_users_this_song[room_name] = set()
 
 # ===== Existing Helpers =====
 def get_display_name():
@@ -546,6 +547,15 @@ def handle_add_video_socket(data):
     is_mod = user_can_moderate(current_user.id, room_name)
     current_head = get_current_turn(room_name)
 
+    # ----- NEW: one-add-per-user-per-song guard (mods included) -----
+    # Initialize set if needed
+    if room_name not in room_added_users_this_song:
+        room_added_users_this_song[room_name] = set()
+    if username in room_added_users_this_song[room_name]:
+        emit('turn_error', {'message': "You've already added during this song. Wait for the next song."}, to=request.sid)
+        return
+    # ----------------------------------------------------------------
+
     # Enforce turn unless moderator
     if not is_mod and (current_head is not None) and (username != current_head):
         emit('turn_error', {'message': f"Not your turn. It's {current_head}'s turn."}, to=request.sid)
@@ -558,61 +568,29 @@ def handle_add_video_socket(data):
         db.session.add(qi)
         db.session.commit()
 
-        # If first item, start playback clock and start a fresh song window
+        # If first item, start playback clock AND a fresh song window
         if QueueItem.query.filter_by(room_id=room.id).count() == 1:
             room_clock[room_name] = {'video_id': video_id, 'base': 0.0, 'started_at': time()}
-            _start_song_window(room_name)
+            _start_song_window(room_name)  # resets per-song set
+
+        # Mark this user as having added during the current song
+        room_added_users_this_song[room_name].add(username)
 
         # Update queue UI (old format for frontend)
         socketio.emit('video_added', convert_queue_to_old_format(get_queue_for_room(room_name)), room=room_name)
 
-        # IMPORTANT: Advance the turn immediately if the *head* added.
-        # (Mods adding out of turn do not rotate the queue.)
+        # If the HEAD added, rotate immediately so next person has time during the same song
         if username == current_head:
             advance_turn(room_name)
-            room_advanced_this_song[room_name] = True  # mark that we rotated during this song
+            room_advanced_this_song[room_name] = True
             broadcast_turn_update(room_name)
         else:
-            # Keep UI's turn widget fresh even if no rotation occurred
             broadcast_turn_update(room_name)
 
     except Exception as e:
         db.session.rollback()
         print(f"Error adding video: {e}")
 
-@socketio.on('video_ended')
-def handle_video_ended():
-    room_name = get_user_room(request.sid)
-
-    # Remove the finished video from DB
-    skip_current_video(room_name)
-
-    # Prepare next playback state
-    queue_items = get_queue_for_room(room_name)
-    current_video_id = extract_video_id(queue_items[0].video_url) if queue_items else ''
-
-    if queue_items:
-        room_clock[room_name] = {'video_id': current_video_id, 'base': 0.0, 'started_at': time()}
-    else:
-        room_clock[room_name] = {'video_id': '', 'base': 0.0, 'started_at': None}
-
-    emit('video_ended', room=room_name)
-
-    # ----- SONG-END TURN LOGIC -----
-    # If we *didn't* already rotate during this song (on add), rotate now (they missed their turn).
-    if not room_advanced_this_song.get(room_name, False) and get_turn_queue(room_name):
-        advance_turn(room_name)
-        broadcast_turn_update(room_name)
-
-    # New song window begins (if any song is now playing)
-    _start_song_window(room_name)
-
-    # Send updated queue state
-    emit('sync_video', {
-        'video_queue': convert_queue_to_old_format(queue_items),
-        'time': 0,
-        'current_video': current_video_id
-    }, room=room_name)
 
 @socketio.on('request_sync')
 def handle_request_sync():
