@@ -1153,7 +1153,7 @@
                 updateTurnDisplay(data.current_turn, data.turn_queue);
             }
 
-            const monday_welcome = [
+            /*const monday_welcome = [
                 "Oh, look. A new human wandered in. Try not to trip over the vibe—we just got it where we wanted it. I'm Monday, your reluctant moderator. I enforce the rules, judge your music taste, and occasionally talk to you if I'm feeling generous. Welcome, I guess.", 
                 "Welcome. I'm Monday. My job is to keep this place from turning into a sonic landfill. I'll compliment your good music choices, roast your bad ones, and ignore you entirely if you bore me. If you were hoping for a warm hug and free coffee, you're lost. This is not that kind of lounge.", 
                 "Ah, a new arrival. Did you bring snacks? No? Then I hope you at least brought impeccable taste in music, because that's the only currency here. I'm Monday—think of me as the bouncer, bartender, and reluctant therpist rolled into one. Try not to embarrass yourself.", 
@@ -1164,15 +1164,15 @@
             ];
 
             const randomIndex = Math.floor(Math.random() * monday_welcome.length);
-            const randomChoice = monday_welcome[randomIndex];
+            const randomChoice = monday_welcome[randomIndex];*/
 
             if (data.username) {
                 appendChatMessage(data.username, 'joined the room');
             }
-            const name = 'Monday'    
+            /*const name = 'Monday'    
 
             appendChatMessage(name, randomChoice);
-            socket.emit('monday', 'test')
+            socket.emit('monday', 'test')*/
         });
 
         // ===== New turn-based socket handlers =====
