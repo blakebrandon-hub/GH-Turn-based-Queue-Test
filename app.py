@@ -481,11 +481,11 @@ def on_connect():
     
     emit('room_joined', {
         'room': room_name, 
-        'is_private': is_private,
-        'username': get_display_name(),
+        'username': username,
+        'is_private': private,
         'current_turn': current_turn,
         'turn_queue': turn_queue
-    }, room=room_name)
+    }, to=request.sid)
 
 @socketio.on('join_room')
 def handle_join(data):
@@ -541,6 +541,16 @@ def handle_join(data):
         'room': room_name, 
         'username': username,
         'is_private': private,
+        'current_turn': current_turn,
+        'turn_queue': turn_queue
+    }, to=request.sid)
+
+    join_msg = {'username': '', 'text': f'{username} joined the room'}
+    messages[room_name].append(join_msg)
+    emit('new_message', join_msg, room=room_name)
+
+    emit('user_joined', {
+        'username': username,
         'current_turn': current_turn,
         'turn_queue': turn_queue
     }, room=room_name)
